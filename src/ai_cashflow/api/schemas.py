@@ -62,6 +62,7 @@ class AmazonSourceUpdate(AmazonIntegrationUpdate):
 
 
 class AmazonTransactionBackfillCreate(BaseModel):
+    job_type: Literal["CANARY", "HISTORICAL_BACKFILL"] = "HISTORICAL_BACKFILL"
     marketplace_id: str = Field(min_length=1, max_length=40)
     marketplace_name: str = Field(min_length=1, max_length=120)
     currency: str = Field(min_length=3, max_length=3)

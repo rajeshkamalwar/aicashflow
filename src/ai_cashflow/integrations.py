@@ -35,6 +35,9 @@ AMAZON_SP_API_ENDPOINTS = frozenset(
 DEFAULT_AMAZON_ENDPOINT = "https://sellingpartnerapi-na.amazon.com"
 LOGGER = logging.getLogger(__name__)
 TRANSACTION_STATUSES = ("DEFERRED", "DEFERRED_RELEASED", "RELEASED")
+TRANSACTION_JOB_TYPES = (
+    "CANARY", "INCREMENTAL_SYNC", "HISTORICAL_BACKFILL", "LEGACY_UNCLASSIFIED",
+)
 
 
 def _utc_now() -> str:
@@ -536,6 +539,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 CREATE TABLE IF NOT EXISTS amazon_transaction_runs (
                     run_id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL CHECK (kind IN ('incremental', 'backfill')),
+                    job_type TEXT NOT NULL DEFAULT 'LEGACY_UNCLASSIFIED',
+                    parent_job_id TEXT,
                     source_id TEXT NOT NULL,
                     marketplace_id TEXT NOT NULL,
                     marketplace_name TEXT NOT NULL,
@@ -575,6 +580,18 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 connection.execute(
                     "ALTER TABLE amazon_transaction_runs ADD COLUMN throttled_attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            if "job_type" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE amazon_transaction_runs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'LEGACY_UNCLASSIFIED'"
+                )
+            if "parent_job_id" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE amazon_transaction_runs ADD COLUMN parent_job_id TEXT"
+                )
+            connection.execute(
+                """UPDATE amazon_transaction_runs SET job_type='INCREMENTAL_SYNC'
+                   WHERE kind='incremental' AND job_type='LEGACY_UNCLASSIFIED'"""
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS amazon_transaction_staging (
@@ -599,6 +616,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 """
                 CREATE TABLE IF NOT EXISTS amazon_transaction_backfill_jobs (
                     job_id TEXT PRIMARY KEY,
+                    job_type TEXT NOT NULL DEFAULT 'LEGACY_UNCLASSIFIED',
                     source_id TEXT NOT NULL,
                     marketplace_id TEXT NOT NULL,
                     marketplace_name TEXT NOT NULL,
@@ -642,6 +660,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 ("status_conflicts", "INTEGER NOT NULL DEFAULT 0"),
                 ("consecutive_throttles", "INTEGER NOT NULL DEFAULT 0"),
                 ("pause_reason", "TEXT"),
+                ("job_type", "TEXT NOT NULL DEFAULT 'LEGACY_UNCLASSIFIED'"),
             ):
                 if column not in backfill_columns:
                     connection.execute(
@@ -974,6 +993,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         self,
         *,
         kind: str,
+        job_type: str,
+        parent_job_id: str | None = None,
         source_id: str,
         marketplace_id: str,
         marketplace_name: str,
@@ -984,6 +1005,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
     ) -> str:
         if transaction_status not in TRANSACTION_STATUSES:
             raise ValueError(f"Unsupported Amazon transaction status: {transaction_status}.")
+        if job_type not in TRANSACTION_JOB_TYPES:
+            raise ValueError(f"Unsupported Amazon transaction job type: {job_type}.")
         start, end = self._utc(coverage_start), self._utc(coverage_end)
         if start >= end or end - start > timedelta(days=180):
             raise ValueError("Amazon transaction windows must be positive and no longer than 180 days.")
@@ -992,10 +1015,10 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO amazon_transaction_runs
-                   (run_id, kind, source_id, marketplace_id, marketplace_name, currency,
+                   (run_id, kind, job_type, parent_job_id, source_id, marketplace_id, marketplace_name, currency,
                     transaction_status, coverage_start, coverage_end, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
-                (run_id, kind, source_id, marketplace_id, marketplace_name, currency,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+                (run_id, kind, job_type, parent_job_id, source_id, marketplace_id, marketplace_name, currency,
                  transaction_status, start.isoformat(), end.isoformat(), now, now),
             )
         return run_id
@@ -1151,6 +1174,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         self, *, source_id: str, marketplace_id: str, marketplace_name: str,
         currency: str, transaction_status: str, overall_start: datetime,
         overall_end: datetime, slice_hours: int = 24,
+        job_type: str = "HISTORICAL_BACKFILL",
     ) -> dict[str, Any]:
         self._source_row(source_id)
         start, end = self._utc(overall_start), self._utc(overall_end)
@@ -1160,17 +1184,19 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             raise ValueError(f"Unsupported Amazon transaction status: {transaction_status}.")
         if slice_hours < 1 or slice_hours > 24 * 30:
             raise ValueError("Backfill slice must be between 1 hour and 30 days.")
+        if job_type not in {"CANARY", "HISTORICAL_BACKFILL"}:
+            raise ValueError("Transaction jobs must be CANARY or HISTORICAL_BACKFILL.")
         slice_end = min(start + timedelta(hours=slice_hours), end)
         job_id = uuid4().hex
         now = _utc_now()
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO amazon_transaction_backfill_jobs
-                   (job_id, source_id, marketplace_id, marketplace_name, currency, transaction_status,
+                   (job_id, job_type, source_id, marketplace_id, marketplace_name, currency, transaction_status,
                     overall_start, overall_end, current_slice_start, current_slice_end, slice_hours,
                     status, starting_database_bytes, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
-                (job_id, source_id, marketplace_id, marketplace_name, currency.upper(), transaction_status,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+                (job_id, job_type, source_id, marketplace_id, marketplace_name, currency.upper(), transaction_status,
                  start.isoformat(), end.isoformat(), start.isoformat(), slice_end.isoformat(),
                  slice_hours, self.database_path.stat().st_size, now, now),
             )
@@ -1286,7 +1312,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             run_id = job["active_run_id"]
             if not run_id:
                 run_id = self._create_collection_run(
-                    kind="backfill", source_id=job["source_id"], marketplace_id=job["marketplace_id"],
+                    kind="backfill", job_type=job["job_type"], parent_job_id=job_id,
+                    source_id=job["source_id"], marketplace_id=job["marketplace_id"],
                     marketplace_name=job["marketplace_name"], currency=job["currency"],
                     transaction_status=job["transaction_status"],
                     coverage_start=datetime.fromisoformat(job["current_slice_start"]),
@@ -1425,7 +1452,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                         else coverage_end - timedelta(hours=lookback_hours)
                     )
                     run_id = self._create_collection_run(
-                        kind="incremental", source_id=source_id, marketplace_id=marketplace_id,
+                        kind="incremental", job_type="INCREMENTAL_SYNC",
+                        source_id=source_id, marketplace_id=marketplace_id,
                         marketplace_name=str(marketplace.get("name") or marketplace_id),
                         currency=str(marketplace.get("currency") or "").upper(),
                         transaction_status=status, coverage_start=start, coverage_end=coverage_end,
@@ -1488,7 +1516,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "SELECT * FROM amazon_transaction_runs WHERE source_id=? ORDER BY created_at DESC LIMIT 100",
                 (source_id,),
             ).fetchall()
-            backfill_runs = connection.execute(
+            typed_runs = connection.execute(
                 "SELECT * FROM amazon_transaction_runs WHERE source_id=? AND kind='backfill'",
                 (source_id,),
             ).fetchall()
@@ -1511,11 +1539,13 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    ORDER BY retrieved_at DESC LIMIT 100""",
                 (source_id,),
             ).fetchall()
-        def backfill_progress(row: sqlite3.Row) -> dict[str, Any]:
+        def job_progress(row: sqlite3.Row) -> dict[str, Any]:
             result = self._public_backfill_row(row)
             scoped_runs = [
-                run for run in backfill_runs
-                if run["marketplace_id"] == row["marketplace_id"]
+                run for run in typed_runs
+                if run["job_type"] == row["job_type"]
+                and run["parent_job_id"] == row["job_id"]
+                and run["marketplace_id"] == row["marketplace_id"]
                 and run["currency"] == row["currency"]
                 and run["transaction_status"] == row["transaction_status"]
                 and run["coverage_start"] >= row["overall_start"]
@@ -1537,11 +1567,34 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             })
             return result
 
+        incremental_runs = [
+            self._public_collection_row(row)
+            for row in runs if row["job_type"] == "INCREMENTAL_SYNC"
+        ]
+        canaries = [job_progress(row) for row in jobs if row["job_type"] == "CANARY"]
+        historical = [
+            job_progress(row) for row in jobs if row["job_type"] == "HISTORICAL_BACKFILL"
+        ]
+        legacy = [
+            job_progress(row) for row in jobs if row["job_type"] == "LEGACY_UNCLASSIFIED"
+        ]
+
         return {
             "source_id": source_id,
             "checkpoints": [self._public_collection_row(row) for row in checkpoints],
             "runs": [self._public_collection_row(row) for row in runs],
-            "backfills": [backfill_progress(row) for row in jobs],
+            "incremental_collection": {
+                "status": "ACTIVE" if checkpoints else "NOT_STARTED",
+                "last_successful_run": max(
+                    (row["completed_at"] for row in incremental_runs if row["completed_at"]),
+                    default=None,
+                ),
+                "runs": incremental_runs,
+            },
+            "validation_canaries": canaries,
+            "historical_backfills": historical,
+            "legacy_unclassified": legacy,
+            "backfills": historical,
             "observation_count": counts[0],
             "current_state_count": counts[1],
             "status_conflict_count": counts[2],
@@ -1800,8 +1853,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             historical_jobs = [
                 row for row in backfill_jobs
                 if row["currency"] == selected_currency
-                and checkpoint_start
-                and row["overall_start"] < checkpoint_start
+                and row["job_type"] == "HISTORICAL_BACKFILL"
             ]
             requested_start = min(
                 (row["overall_start"] for row in historical_jobs), default=None
@@ -1812,6 +1864,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             historical_runs = [
                 row for row in collection_runs
                 if row["currency"] == selected_currency
+                and row["job_type"] == "HISTORICAL_BACKFILL"
                 and requested_start
                 and row["coverage_start"] >= requested_start
                 and row["coverage_end"] <= requested_end
@@ -1845,15 +1898,47 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 and all(row["status"] == "completed" for row in historical_jobs)
             )
             coverage_complete = coverage_complete and not pending_slice_count and not failed_slice_count
-            completed_starts = [row["coverage_start"] for row in relevant_checkpoints]
-            completed_starts.extend(row["coverage_start"] for row in completed_runs)
-            completed_ends = [row["coverage_end"] for row in relevant_checkpoints]
-            completed_ends.extend(row["coverage_end"] for row in completed_runs)
+            completed_historical_start = min(
+                (row["coverage_start"] for row in completed_runs), default=None
+            )
+            completed_historical_end = max(
+                (row["coverage_end"] for row in completed_runs), default=None
+            )
+            if not historical_jobs:
+                historical_status = "NOT_STARTED"
+            elif any(row["status"] == "failed" for row in historical_jobs) or failed_slice_count:
+                historical_status = "FAILED"
+            elif any(row["status"] == "paused" for row in historical_jobs):
+                historical_status = "PAUSED"
+            elif coverage_complete:
+                historical_status = "COMPLETE"
+            elif completed_slice_count:
+                historical_status = "PARTIALLY_COMPLETE"
+            elif any(row["status"] == "running" for row in historical_jobs):
+                historical_status = "RUNNING"
+            else:
+                historical_status = "PARTIALLY_COMPLETE"
             coverage = {
+                "observed_start": checkpoint_start,
+                "observed_end": checkpoint_end,
+                "transaction_count": len(visible),
+                "has_observed_data": bool(relevant_checkpoints),
+                "historical_backfill_status": historical_status,
+                "requested_historical_start": requested_start,
+                "requested_historical_end": requested_end,
+                "completed_historical_start": completed_historical_start,
+                "completed_historical_end": completed_historical_end,
+                "is_historically_complete": coverage_complete,
                 "requested_start": requested_start,
                 "requested_end": requested_end,
-                "completed_start": min(completed_starts, default=None),
-                "completed_end": max(completed_ends, default=None),
+                "completed_start": min(
+                    (value for value in (checkpoint_start, completed_historical_start) if value),
+                    default=None,
+                ),
+                "completed_end": max(
+                    (value for value in (checkpoint_end, completed_historical_end) if value),
+                    default=None,
+                ),
                 "is_complete": coverage_complete,
                 "has_gaps": not coverage_complete,
                 "completed_slice_count": completed_slice_count,
@@ -1864,11 +1949,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                     (row["retrieved_at"] for row in relevant_checkpoints), default=None
                 ),
                 "classification": "COMPLETE_COVERAGE" if coverage_complete else "PARTIAL_COVERAGE",
-                "backfill_status": (
-                    "not_started" if not historical_jobs
-                    else "complete" if coverage_complete
-                    else max(historical_jobs, key=lambda row: row["updated_at"])["status"]
-                ),
+                "backfill_status": historical_status.lower(),
             }
             partial_failure = (
                 any(bool(row["last_error"]) for row in relevant_checkpoints)

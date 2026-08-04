@@ -1099,27 +1099,42 @@ function renderTransactionVisibility(position) {
     : "No successful, positive Closed transfer is available in this scope.");
 
   const coverageRows = entries.map(([, row]) => row?.coverage || {}).filter(Boolean);
-  const coverageStarts = coverageRows.map((row) => row.completed_start).filter(Boolean).sort();
-  const coverageEnds = coverageRows.map((row) => row.completed_end).filter(Boolean).sort();
+  const coverageStarts = coverageRows.map((row) => row.observed_start || row.completed_start).filter(Boolean).sort();
+  const coverageEnds = coverageRows.map((row) => row.observed_end || row.completed_end).filter(Boolean).sort();
   const retrieved = coverageRows.map((row) => row.last_successful_collection_at).filter(Boolean).sort();
-  const isComplete = coverageRows.length > 0 && coverageRows.every((row) => row.is_complete);
+  const isComplete = coverageRows.length > 0 && coverageRows.every((row) => row.is_historically_complete ?? row.is_complete);
   const transactionCount = entries.reduce((sum, [, row]) => sum + Number(row?.count || 0), 0);
-  const coverageLabel = `${formatUtcCoverage(coverageStarts[0])} to ${formatUtcCoverage(coverageEnds.at(-1))}`;
+  const observedStart = formatUtcCoverage(coverageStarts[0]);
+  const observedEnd = formatUtcCoverage(coverageEnds.at(-1));
+  const coverageLabel = `${observedStart} to ${observedEnd}`;
+  const historicalStatuses = coverageRows.map((row) => row.historical_backfill_status || "NOT_STARTED");
+  const historicalStatus = historicalStatuses.every((status) => status === "COMPLETE")
+    ? "Complete"
+    : historicalStatuses.some((status) => status !== "NOT_STARTED")
+      ? historicalStatuses.join(", ")
+      : "Not started";
+  const canaries = state.amazonTransactionDiagnostics?.validation_canaries || [];
+  const canaryStatus = canaries.length && canaries.every((row) => row.status === "completed")
+    ? "Completed successfully"
+    : canaries.length ? "Requires review" : "Not run";
   setText("overview-coverage-badge", isComplete ? "Complete coverage" : "Partial coverage");
   setText("overview-coverage-warning", isComplete ? "Historical coverage is complete." : "Historical coverage is incomplete.");
   setText("overview-released-note", `Persisted released transactions collected from ${coverageLabel}.`);
   document.getElementById("overview-deferred-meta").innerHTML = `
     <span><b>Data classification</b> AMAZON_TRANSACTION_DERIVED</span>
-    <span><b>Coverage</b> ${escapeHtml(coverageLabel)}</span>
+    <span><b>Collected from</b> ${escapeHtml(observedStart)}</span>
+    <span><b>Collected through</b> ${escapeHtml(observedEnd)}</span>
     <span><b>Classification</b> ${isComplete ? "COMPLETE_COVERAGE" : "PARTIAL_COVERAGE"}</span>
     <span><b>Transactions</b> ${transactionCount.toLocaleString()}</span>
     <span><b>Last collection</b> ${escapeHtml(formatUtcCoverage(retrieved.at(-1)))}</span>
     <span><b>Reconciliation</b> ${escapeHtml(entries.map(([, row]) => row?.reconciliation_state || "not_verified").join(", ") || "not_verified")}</span>
-    <span><b>Backfill</b> ${escapeHtml(coverageRows.map((row) => row.backfill_status || "not_started").join(", ") || "not_started")}</span>`;
+    <span><b>Incremental collection</b> ${coverageRows.some((row) => row.has_observed_data) ? "Active" : "Not started"}</span>
+    <span><b>Historical backfill</b> ${escapeHtml(historicalStatus)}</span>
+    <span><b>Validation canaries</b> ${escapeHtml(canaryStatus)}</span>`;
   setText("overview-transaction-composition-title", isComplete ? "Transaction Composition" : "Transaction Composition — Partial Coverage");
   setText("overview-transaction-composition-note", isComplete
     ? "This breakdown reflects persisted Amazon transactions for the completed coverage period."
-    : "This breakdown reflects only persisted Amazon transactions within the displayed coverage period. It does not yet represent the complete Seller Central settlement period.");
+    : `This breakdown reflects persisted Amazon transactions within the displayed observed coverage. Historical backfill ${historicalStatus.toLowerCase()}.`);
   document.getElementById("overview-transaction-composition-meta").innerHTML = `
     <span><b>Coverage</b> ${escapeHtml(coverageLabel)}</span>
     <span><b>Completeness</b> ${isComplete ? "Complete" : "Partial coverage"}</span>
@@ -1720,8 +1735,26 @@ function renderBackfillProgress() {
   const diagnostics = state.amazonTransactionDiagnostics;
   panel.hidden = !state.session?.is_admin || !diagnostics;
   if (panel.hidden) return;
-  const rows = Array.isArray(diagnostics.backfills) ? diagnostics.backfills : [];
-  container.innerHTML = rows.length ? rows.map((row) => `<article class="source-overview-row">
+  const incremental = diagnostics.incremental_collection || {};
+  const canaries = Array.isArray(diagnostics.validation_canaries) ? diagnostics.validation_canaries : [];
+  const historical = Array.isArray(diagnostics.historical_backfills) ? diagnostics.historical_backfills : [];
+  const latestIncremental = Array.isArray(incremental.runs) ? incremental.runs[0] : null;
+  const incrementalHtml = `<h3>Incremental collection</h3><article class="source-overview-row">
+    <div class="source-overview-name"><strong>${escapeHtml(incremental.status || "NOT_STARTED")}</strong><span>Recent/current observed coverage only</span></div>
+    <div><span>Last successful run</span><strong>${escapeHtml(formatUtcCoverage(incremental.last_successful_run))}</strong></div>
+    <div><span>Recent checkpoint</span><strong>${escapeHtml(formatUtcCoverage(diagnostics.checkpoints?.map((row) => row.coverage_end).filter(Boolean).sort().at(-1)))}</strong></div>
+    <div><span>Processed</span><strong>${Number(latestIncremental?.pages_completed || 0).toLocaleString()} pages · ${Number(latestIncremental?.transactions_received || 0).toLocaleString()} transactions</strong></div>
+    <div><span>Errors / freshness</span><strong>${escapeHtml(latestIncremental?.last_error || "None")} · ${escapeHtml(formatUtcCoverage(latestIncremental?.updated_at))}</strong></div>
+  </article>`;
+  const canaryHtml = `<h3>Validation canaries</h3>${canaries.length ? canaries.map((row) => `<article class="source-overview-row">
+    <div class="source-overview-name"><strong>Canary ${escapeHtml(row.status || "unknown")}</strong><span>${escapeHtml(row.marketplace_name)} · ${escapeHtml(row.currency)} · ${escapeHtml(row.transaction_status)}</span></div>
+    <div><span>Coverage window</span><strong>${escapeHtml(formatUtcCoverage(row.overall_start))} — ${escapeHtml(formatUtcCoverage(row.overall_end))}</strong></div>
+    <div><span>Result</span><strong>${row.status === "completed" ? "Completed successfully" : escapeHtml(row.status)}</strong></div>
+    <div><span>Deduplication</span><strong>${Number(row.status_conflicts || 0).toLocaleString()} conflicts</strong></div>
+    <div><span>Storage growth</span><strong>${Number(row.database_growth_bytes || 0).toLocaleString()} bytes</strong></div>
+  </article>`).join("") : '<div class="empty-state">No validation canary has been recorded.</div>'}
+  <p class="muted">Canary runs validate collection and deduplication. They do not represent historical coverage.</p>`;
+  const historicalHtml = `<h3>Historical backfill</h3>${historical.length ? historical.map((row) => `<article class="source-overview-row">
     <div class="source-overview-name"><strong>${escapeHtml(row.marketplace_name || row.marketplace_id || "Marketplace")}</strong><span>${escapeHtml(row.transaction_status || "Status unavailable")}</span></div>
     <div><span>Status</span><strong>${escapeHtml(row.status || "not started")}</strong></div>
     <div><span>Requested range</span><strong>${escapeHtml(formatUtcCoverage(row.overall_start))} — ${escapeHtml(formatUtcCoverage(row.overall_end))}</strong></div>
@@ -1732,7 +1765,8 @@ function renderBackfillProgress() {
     <div><span>Conflicts / DB growth</span><strong>${Number(row.status_conflicts || 0).toLocaleString()} · ${Number(row.database_growth_bytes || 0).toLocaleString()} bytes</strong></div>
     <div><span>Last update</span><strong>${escapeHtml(formatUtcCoverage(row.updated_at))}</strong></div>
     <div><span>Pause / error</span><strong>${escapeHtml(row.pause_reason || row.last_error || "None")}</strong></div>
-  </article>`).join("") : '<div class="empty-state">Historical backfill has not started. Current transaction visibility remains available with partial coverage.</div>';
+  </article>`).join("") : '<div class="empty-state">Historical backfill has not started. Current transaction visibility remains available with partial coverage.</div>'}`;
+  container.innerHTML = incrementalHtml + canaryHtml + historicalHtml;
 }
 
 function renderCashflowProofSummary() {

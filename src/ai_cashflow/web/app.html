@@ -128,13 +128,13 @@
 
         <details id="overview-transaction-breakdown" class="panel transaction-breakdown" hidden>
           <summary id="overview-transaction-composition-title">Transaction Composition — Partial Coverage</summary>
-          <p id="overview-transaction-composition-note" class="muted">This breakdown reflects only persisted Amazon transactions within the displayed coverage period. It does not yet represent the complete Seller Central settlement period.</p>
+          <p id="overview-transaction-composition-note" class="muted">This breakdown reflects persisted Amazon transactions within the displayed observed coverage. Historical backfill has not started.</p>
           <div id="overview-transaction-composition-meta" class="open-balance-meta"></div>
           <div id="overview-transaction-composition"></div>
         </details>
 
         <section id="overview-backfill-progress" class="panel" hidden>
-          <div class="panel-title"><div><h2>Backfill Progress</h2><span>Administrator-only persisted Amazon collection progress.</span></div></div>
+          <div class="panel-title"><div><h2>Collection Progress</h2><span>Incremental collection, validation canaries, and historical backfill are tracked separately.</span></div></div>
           <div id="overview-backfill-progress-list" class="source-overview-list"></div>
         </section>
 

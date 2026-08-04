@@ -276,6 +276,7 @@ class AmazonSourceRegistryTests(unittest.TestCase):
                 source_id=source["id"], marketplace_id="CA", marketplace_name="Amazon.ca",
                 currency="CAD", transaction_status="DEFERRED",
                 overall_start=start, overall_end=start.replace(hour=15, minute=42), slice_hours=1,
+                job_type="CANARY",
             )
 
             coverage = registry.transaction_visibility(source["id"], "CAD")["coverage"]
@@ -283,6 +284,7 @@ class AmazonSourceRegistryTests(unittest.TestCase):
             self.assertIsNone(coverage["requested_start"])
             self.assertEqual(coverage["classification"], "PARTIAL_COVERAGE")
             self.assertFalse(coverage["is_complete"])
+            self.assertEqual(coverage["historical_backfill_status"], "NOT_STARTED")
 
     def test_transaction_failure_keeps_report_sync_available_and_marks_partial(self):
         class FakeClient:

@@ -87,6 +87,7 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
             "overall_start": self.start,
             "overall_end": self.end,
             "slice_hours": 24,
+            "job_type": "HISTORICAL_BACKFILL",
         }
         values.update(overrides)
         return self.registry.create_transaction_backfill(**values)
@@ -143,6 +144,106 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         self.assertEqual(coverage["completed_slice_count"], 3)
         self.assertEqual(coverage["completed_start"], self.start.isoformat())
         self.assertEqual(coverage["completed_end"], checkpoint_end.isoformat())
+
+    def test_completed_canary_preserves_observed_coverage_without_starting_backfill(self):
+        checkpoint_start = self.end + timedelta(hours=14)
+        checkpoint_end = checkpoint_start + timedelta(hours=6)
+        self.registry.record_transaction_snapshot(
+            self.source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED", [], checkpoint_end,
+            coverage_start=checkpoint_start, coverage_end=checkpoint_end,
+        )
+        job = self.create_job(
+            job_type="CANARY",
+            overall_end=self.start + timedelta(hours=1),
+            slice_hours=1,
+        )
+        self.registry.run_transaction_backfill(job["job_id"], PagedClient())
+
+        visibility = self.registry.transaction_visibility(self.source["id"], "CAD")
+        diagnostics = self.registry.transaction_collection_diagnostics(self.source["id"])
+
+        self.assertEqual(visibility["coverage"]["historical_backfill_status"], "NOT_STARTED")
+        self.assertFalse(visibility["coverage"]["is_historically_complete"])
+        self.assertEqual(visibility["coverage"]["observed_start"], checkpoint_start.isoformat())
+        self.assertEqual(len(diagnostics["validation_canaries"]), 1)
+        self.assertFalse(diagnostics["historical_backfills"])
+
+    def test_multiple_completed_canaries_do_not_increase_historical_progress(self):
+        for offset in (0, 2):
+            job = self.create_job(
+                job_type="CANARY",
+                overall_start=self.start + timedelta(hours=offset),
+                overall_end=self.start + timedelta(hours=offset + 1),
+                slice_hours=1,
+            )
+            self.registry.run_transaction_backfill(job["job_id"], PagedClient())
+
+        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+
+        self.assertEqual(coverage["historical_backfill_status"], "NOT_STARTED")
+        self.assertEqual(coverage["completed_slice_count"], 0)
+        self.assertIsNone(coverage["coverage_percentage"])
+
+    def test_legacy_unclassified_job_is_not_historical_completion(self):
+        job = self.create_job(overall_end=self.start + timedelta(hours=1), slice_hours=1)
+        self.registry.run_transaction_backfill(job["job_id"], PagedClient())
+        with sqlite3.connect(self.db) as connection:
+            run_id = connection.execute(
+                "SELECT run_id FROM amazon_transaction_runs WHERE source_id=? AND job_type='HISTORICAL_BACKFILL'",
+                (self.source["id"],),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE amazon_transaction_backfill_jobs SET job_type='LEGACY_UNCLASSIFIED' WHERE job_id=?",
+                (job["job_id"],),
+            )
+            connection.execute(
+                "UPDATE amazon_transaction_runs SET job_type='LEGACY_UNCLASSIFIED' WHERE run_id=?",
+                (run_id,),
+            )
+
+        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+        diagnostics = self.registry.transaction_collection_diagnostics(self.source["id"])
+
+        self.assertEqual(coverage["historical_backfill_status"], "NOT_STARTED")
+        self.assertEqual(len(diagnostics["legacy_unclassified"]), 1)
+
+    def test_incremental_runs_are_classified_separately(self):
+        result = self.registry.run_incremental_transaction_collection(
+            self.source["id"], PagedClient(), now=self.end + timedelta(hours=1), max_pages=6,
+        )
+        diagnostics = self.registry.transaction_collection_diagnostics(self.source["id"])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(diagnostics["incremental_collection"]["runs"])
+        self.assertTrue(all(
+            row["job_type"] == "INCREMENTAL_SYNC"
+            for row in diagnostics["incremental_collection"]["runs"]
+        ))
+        self.assertFalse(diagnostics["historical_backfills"])
+
+    def test_incomplete_historical_slices_are_partially_complete(self):
+        job = self.create_job()
+        self.registry.run_transaction_backfill(job["job_id"], PagedClient(), max_pages=1)
+
+        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+
+        self.assertEqual(coverage["historical_backfill_status"], "PARTIALLY_COMPLETE")
+        self.assertEqual(coverage["completed_slice_count"], 1)
+        self.assertEqual(coverage["pending_slice_count"], 2)
+        self.assertTrue(coverage["has_gaps"])
+        self.assertFalse(coverage["is_historically_complete"])
+
+    def test_failed_historical_slice_prevents_complete(self):
+        job = self.create_job(overall_end=self.start + timedelta(days=1))
+        self.registry.run_transaction_backfill(
+            job["job_id"], PagedClient(failure=RuntimeError("temporary")), max_pages=1,
+        )
+
+        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+
+        self.assertEqual(coverage["historical_backfill_status"], "FAILED")
+        self.assertEqual(coverage["failed_slice_count"], 1)
+        self.assertFalse(coverage["is_historically_complete"])
 
     def test_backfill_processes_more_than_100_pages_without_truncation(self):
         class LargeClient(PagedClient):
