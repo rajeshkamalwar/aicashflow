@@ -84,11 +84,23 @@ class ApiAppTests(unittest.TestCase):
         self.assertIn("Previously Deferred, Released During Observed Period", content)
         self.assertIn("Most Recent Completed Payout", content)
         self.assertIn("Only successful, positive Closed transfers.", content)
-        self.assertIn("Observed within the last 179 days", content)
+        self.assertNotIn("Observed within the last 179 days", content)
+        self.assertIn("Historical coverage is incomplete.", content)
+        self.assertIn("Partial coverage", content)
+        self.assertIn("Transaction Composition — Partial Coverage", content)
+        self.assertIn("successfully collected Amazon API coverage", content)
+        self.assertIn("Backfill Progress", content)
         self.assertIn("AMAZON_TRANSACTION_DERIVED", content)
         self.assertNotIn("open plus deferred", content.lower())
         self.assertIn('const enabled = Boolean(position?.transaction_visibility_enabled);', content)
         self.assertIn('if (!enabled) return;', content)
+
+    def test_settlement_status_uses_the_financial_position_group_count(self):
+        app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("position?.openSettlementGroupCount", app_js)
+        self.assertNotIn('["Open settlement groups", expected.length', app_js)
+        self.assertIn("position.group_count", app_js)
 
     def test_overview_loads_current_cash_positions_for_all_connected_sources(self):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
@@ -341,6 +353,10 @@ class ApiAppTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         self.assertEqual(diagnostics.status_code, 200)
         self.assertEqual(diagnostics.json()["backfills"][0]["status"], "running")
+        self.assertEqual(diagnostics.json()["backfills"][0]["completed_slice_count"], 0)
+        self.assertEqual(diagnostics.json()["backfills"][0]["pending_slice_count"], 1)
+        self.assertEqual(diagnostics.json()["backfills"][0]["failed_slice_count"], 0)
+        self.assertIn("database_growth_bytes", diagnostics.json()["backfills"][0])
 
     def test_amazon_admin_settings_require_proxy_authenticated_admin_in_production(self):
         with tempfile.TemporaryDirectory() as temp_dir:

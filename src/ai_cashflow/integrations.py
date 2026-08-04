@@ -9,6 +9,7 @@ from pathlib import Path
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1487,6 +1488,10 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "SELECT * FROM amazon_transaction_runs WHERE source_id=? ORDER BY created_at DESC LIMIT 100",
                 (source_id,),
             ).fetchall()
+            backfill_runs = connection.execute(
+                "SELECT * FROM amazon_transaction_runs WHERE source_id=? AND kind='backfill'",
+                (source_id,),
+            ).fetchall()
             jobs = connection.execute(
                 "SELECT * FROM amazon_transaction_backfill_jobs WHERE source_id=? ORDER BY created_at DESC",
                 (source_id,),
@@ -1506,11 +1511,37 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    ORDER BY retrieved_at DESC LIMIT 100""",
                 (source_id,),
             ).fetchall()
+        def backfill_progress(row: sqlite3.Row) -> dict[str, Any]:
+            result = self._public_backfill_row(row)
+            scoped_runs = [
+                run for run in backfill_runs
+                if run["marketplace_id"] == row["marketplace_id"]
+                and run["currency"] == row["currency"]
+                and run["transaction_status"] == row["transaction_status"]
+                and run["coverage_start"] >= row["overall_start"]
+                and run["coverage_end"] <= row["overall_end"]
+            ]
+            expected = max(1, math.ceil((
+                datetime.fromisoformat(row["overall_end"])
+                - datetime.fromisoformat(row["overall_start"])
+            ).total_seconds() / (int(row["slice_hours"]) * 3600)))
+            completed = [run for run in scoped_runs if run["status"] == "completed"]
+            failed = [run for run in scoped_runs if run["status"] == "failed"]
+            result.update({
+                "completed_start": min((run["coverage_start"] for run in completed), default=None),
+                "completed_end": max((run["coverage_end"] for run in completed), default=None),
+                "completed_slice_count": len(completed),
+                "pending_slice_count": max(0, expected - len(completed) - len(failed)),
+                "failed_slice_count": len(failed),
+                "estimated_remaining_work": None,
+            })
+            return result
+
         return {
             "source_id": source_id,
             "checkpoints": [self._public_collection_row(row) for row in checkpoints],
             "runs": [self._public_collection_row(row) for row in runs],
-            "backfills": [self._public_backfill_row(row) for row in jobs],
+            "backfills": [backfill_progress(row) for row in jobs],
             "observation_count": counts[0],
             "current_state_count": counts[1],
             "status_conflict_count": counts[2],
@@ -1732,6 +1763,14 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    FROM amazon_transaction_runs WHERE source_id=? AND status='failed'""",
                 (source_id,),
             ).fetchall()
+            collection_runs = connection.execute(
+                "SELECT * FROM amazon_transaction_runs WHERE source_id=? AND kind='backfill'",
+                (source_id,),
+            ).fetchall()
+            backfill_jobs = connection.execute(
+                "SELECT * FROM amazon_transaction_backfill_jobs WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
 
         def summarize(selected: list[sqlite3.Row], selected_currency: str) -> dict[str, Any]:
             amounts = {status: Decimal("0") for status in TRANSACTION_STATUSES}
@@ -1752,6 +1791,85 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 for bucket, amount in self._composition(payload).items():
                     composition[bucket] = composition.get(bucket, Decimal("0")) + amount
             relevant_checkpoints = [row for row in checkpoints if row["currency"] == selected_currency]
+            checkpoint_start = min(
+                (row["coverage_start"] for row in relevant_checkpoints), default=None
+            )
+            checkpoint_end = max(
+                (row["coverage_end"] for row in relevant_checkpoints), default=None
+            )
+            historical_jobs = [
+                row for row in backfill_jobs
+                if row["currency"] == selected_currency
+                and checkpoint_start
+                and row["overall_start"] < checkpoint_start
+            ]
+            requested_start = min(
+                (row["overall_start"] for row in historical_jobs), default=None
+            )
+            requested_end = max(
+                (row["overall_end"] for row in historical_jobs), default=None
+            )
+            historical_runs = [
+                row for row in collection_runs
+                if row["currency"] == selected_currency
+                and requested_start
+                and row["coverage_start"] >= requested_start
+                and row["coverage_end"] <= requested_end
+            ]
+            completed_runs = [row for row in historical_runs if row["status"] == "completed"]
+            failed_slice_count = sum(row["status"] == "failed" for row in historical_runs)
+            expected_slice_count = sum(
+                max(1, math.ceil((
+                    datetime.fromisoformat(row["overall_end"])
+                    - datetime.fromisoformat(row["overall_start"])
+                ).total_seconds() / (int(row["slice_hours"]) * 3600)))
+                for row in historical_jobs
+            )
+            completed_slice_count = len({
+                (row["marketplace_id"], row["transaction_status"], row["coverage_start"], row["coverage_end"])
+                for row in completed_runs
+            })
+            pending_slice_count = max(
+                0, expected_slice_count - completed_slice_count - failed_slice_count
+            )
+            required_scopes = {
+                (row["marketplace_id"], row["status"]) for row in relevant_checkpoints
+            }
+            completed_job_scopes = {
+                (row["marketplace_id"], row["transaction_status"])
+                for row in historical_jobs if row["status"] == "completed"
+            }
+            coverage_complete = (
+                bool(required_scopes)
+                and required_scopes <= completed_job_scopes
+                and all(row["status"] == "completed" for row in historical_jobs)
+            )
+            coverage_complete = coverage_complete and not pending_slice_count and not failed_slice_count
+            completed_starts = [row["coverage_start"] for row in relevant_checkpoints]
+            completed_starts.extend(row["coverage_start"] for row in completed_runs)
+            completed_ends = [row["coverage_end"] for row in relevant_checkpoints]
+            completed_ends.extend(row["coverage_end"] for row in completed_runs)
+            coverage = {
+                "requested_start": requested_start,
+                "requested_end": requested_end,
+                "completed_start": min(completed_starts, default=None),
+                "completed_end": max(completed_ends, default=None),
+                "is_complete": coverage_complete,
+                "has_gaps": not coverage_complete,
+                "completed_slice_count": completed_slice_count,
+                "pending_slice_count": pending_slice_count,
+                "failed_slice_count": failed_slice_count,
+                "coverage_percentage": 100 if coverage_complete else None,
+                "last_successful_collection_at": max(
+                    (row["retrieved_at"] for row in relevant_checkpoints), default=None
+                ),
+                "classification": "COMPLETE_COVERAGE" if coverage_complete else "PARTIAL_COVERAGE",
+                "backfill_status": (
+                    "not_started" if not historical_jobs
+                    else "complete" if coverage_complete
+                    else max(historical_jobs, key=lambda row: row["updated_at"])["status"]
+                ),
+            }
             partial_failure = (
                 any(bool(row["last_error"]) for row in relevant_checkpoints)
                 or any(row["currency"] == selected_currency for row in failed_runs)
@@ -1775,12 +1893,14 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "conflict_count": sum(int(row["conflict"]) for row in selected),
                 "excluded_count": len(selected) - len(visible),
                 "totals_partial": len(selected) != len(visible) or partial_failure,
+                "coverage": coverage,
+                "reconciliation_state": coverage["classification"],
                 "composition": {
                     key: str(value.quantize(Decimal("0.01")))
                     for key, value in composition.items() if value
                 },
-                "coverage_start": min((row["coverage_start"] for row in relevant_checkpoints), default=None),
-                "coverage_end": max((row["coverage_end"] for row in relevant_checkpoints), default=None),
+                "coverage_start": checkpoint_start,
+                "coverage_end": checkpoint_end,
                 "retrieved_at": max((row["retrieved_at"] for row in relevant_checkpoints), default=None),
                 "pagination_complete": bool(relevant_checkpoints) and all(row["pagination_complete"] for row in relevant_checkpoints),
                 "partial_failure": partial_failure,
@@ -1794,13 +1914,32 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             {row["currency"] for row in rows} |
             {row["currency"] for row in checkpoints if row["currency"]}
         )
+        by_currency = {
+            code: summarize([row for row in rows if row["currency"] == code], code)
+            for code in currencies
+        }
+        coverages = [row["coverage"] for row in by_currency.values()]
+        complete = bool(coverages) and all(row["is_complete"] for row in coverages)
+        coverage = {
+            "requested_start": min((row["requested_start"] for row in coverages if row["requested_start"]), default=None),
+            "requested_end": max((row["requested_end"] for row in coverages if row["requested_end"]), default=None),
+            "completed_start": min((row["completed_start"] for row in coverages if row["completed_start"]), default=None),
+            "completed_end": max((row["completed_end"] for row in coverages if row["completed_end"]), default=None),
+            "is_complete": complete,
+            "has_gaps": not complete,
+            "completed_slice_count": sum(row["completed_slice_count"] for row in coverages),
+            "pending_slice_count": sum(row["pending_slice_count"] for row in coverages),
+            "failed_slice_count": sum(row["failed_slice_count"] for row in coverages),
+            "coverage_percentage": 100 if complete else None,
+            "last_successful_collection_at": max((row["last_successful_collection_at"] for row in coverages if row["last_successful_collection_at"]), default=None),
+            "classification": "COMPLETE_COVERAGE" if complete else "PARTIAL_COVERAGE",
+        }
         return {
             "classification": "AMAZON_TRANSACTION_DERIVED",
             "observation_count": observation_count,
-            "by_currency": {
-                code: summarize([row for row in rows if row["currency"] == code], code)
-                for code in currencies
-            },
+            "coverage": coverage,
+            "reconciliation_state": coverage["classification"],
+            "by_currency": by_currency,
         }
 
     def transaction_reconciliation_report(self, source_id: str) -> dict[str, Any]:

@@ -41,6 +41,7 @@ const state = {
   amazonSyncs: [],
   amazonFinancialPosition: null,
   amazonFinancialPositions: {},
+  amazonTransactionDiagnostics: null,
   sellerStatement: null,
   lastSyncAt: null,
   filters: {
@@ -461,6 +462,9 @@ async function loadData(options = {}) {
       state.amazonSyncs = [];
     }
     await loadAmazonFinancialPositions();
+    state.amazonTransactionDiagnostics = session.is_admin && state.filters.sourceId
+      ? await fetchJson(`/admin/integrations/amazon/sources/${encodeURIComponent(state.filters.sourceId)}/transaction-collection`).catch(() => null)
+      : null;
     state.sellerStatement = sellerStatement?.status === "loaded" ? sellerStatement : null;
     const latestSourceSync = state.amazonSources
       .map((source) => source.last_sync_at)
@@ -1094,13 +1098,32 @@ function renderTransactionVisibility(position) {
     ? `Only successful, positive Closed transfers. ${completed.map(([, row]) => `${row.transfer_date || "Date unavailable"} · ${row.financial_event_group_id || "ID unavailable"}`).join(" · ")}`
     : "No successful, positive Closed transfer is available in this scope.");
 
-  const coverageStarts = entries.map(([, row]) => row?.coverage_start).filter(Boolean).sort();
-  const coverageEnds = entries.map(([, row]) => row?.coverage_end).filter(Boolean).sort();
-  const retrieved = entries.map(([, row]) => row?.retrieved_at).filter(Boolean).sort();
+  const coverageRows = entries.map(([, row]) => row?.coverage || {}).filter(Boolean);
+  const coverageStarts = coverageRows.map((row) => row.completed_start).filter(Boolean).sort();
+  const coverageEnds = coverageRows.map((row) => row.completed_end).filter(Boolean).sort();
+  const retrieved = coverageRows.map((row) => row.last_successful_collection_at).filter(Boolean).sort();
+  const isComplete = coverageRows.length > 0 && coverageRows.every((row) => row.is_complete);
+  const transactionCount = entries.reduce((sum, [, row]) => sum + Number(row?.count || 0), 0);
+  const coverageLabel = `${formatUtcCoverage(coverageStarts[0])} to ${formatUtcCoverage(coverageEnds.at(-1))}`;
+  setText("overview-coverage-badge", isComplete ? "Complete coverage" : "Partial coverage");
+  setText("overview-coverage-warning", isComplete ? "Historical coverage is complete." : "Historical coverage is incomplete.");
+  setText("overview-released-note", `Persisted released transactions collected from ${coverageLabel}.`);
   document.getElementById("overview-deferred-meta").innerHTML = `
-    <span><b>Classification</b> AMAZON_TRANSACTION_DERIVED</span>
-    <span><b>Coverage</b> ${escapeHtml(coverageStarts[0] || "Unavailable")} to ${escapeHtml(coverageEnds.at(-1) || "Unavailable")}</span>
-    <span><b>Retrieved</b> ${escapeHtml(retrieved.at(-1) || "Unavailable")}</span>`;
+    <span><b>Data classification</b> AMAZON_TRANSACTION_DERIVED</span>
+    <span><b>Coverage</b> ${escapeHtml(coverageLabel)}</span>
+    <span><b>Classification</b> ${isComplete ? "COMPLETE_COVERAGE" : "PARTIAL_COVERAGE"}</span>
+    <span><b>Transactions</b> ${transactionCount.toLocaleString()}</span>
+    <span><b>Last collection</b> ${escapeHtml(formatUtcCoverage(retrieved.at(-1)))}</span>
+    <span><b>Reconciliation</b> ${escapeHtml(entries.map(([, row]) => row?.reconciliation_state || "not_verified").join(", ") || "not_verified")}</span>
+    <span><b>Backfill</b> ${escapeHtml(coverageRows.map((row) => row.backfill_status || "not_started").join(", ") || "not_started")}</span>`;
+  setText("overview-transaction-composition-title", isComplete ? "Transaction Composition" : "Transaction Composition — Partial Coverage");
+  setText("overview-transaction-composition-note", isComplete
+    ? "This breakdown reflects persisted Amazon transactions for the completed coverage period."
+    : "This breakdown reflects only persisted Amazon transactions within the displayed coverage period. It does not yet represent the complete Seller Central settlement period.");
+  document.getElementById("overview-transaction-composition-meta").innerHTML = `
+    <span><b>Coverage</b> ${escapeHtml(coverageLabel)}</span>
+    <span><b>Completeness</b> ${isComplete ? "Complete" : "Partial coverage"}</span>
+    <span><b>Transactions</b> ${transactionCount.toLocaleString()}</span>`;
 
   const composition = [];
   entries.forEach(([currency, row]) => {
@@ -1109,6 +1132,15 @@ function renderTransactionVisibility(position) {
     });
   });
   document.getElementById("overview-transaction-composition").innerHTML = composition.join("") || '<div class="empty-state">No component-level amounts were returned for this scope.</div>';
+}
+
+function formatUtcCoverage(value) {
+  if (!value) return "Unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : `${date.toLocaleString("en-GB", {
+    day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit",
+    hour12: false, timeZone: "UTC",
+  })} UTC`;
 }
 
 function renderTreasuryOverview() {
@@ -1129,7 +1161,7 @@ function renderTreasuryOverview() {
     balanceEl.innerHTML = balances.length
       ? balances.map(({ currency, amount }) => `<span role="listitem"><b>${escapeHtml(currency)}</b><span>${escapeHtml(formatMoney(moneyNumber(amount)))}</span></span>`).join("")
       : "Unavailable";
-    setText("overview-confirmed-note", `${position.group_count || 1} unique open financial event group(s), deduplicated by FinancialEventGroupId.`);
+    setText("overview-confirmed-note", `${Number(position.group_count ?? position.openSettlementGroupCount ?? 0)} unique open financial event group(s), deduplicated by FinancialEventGroupId.`);
     document.getElementById("overview-open-balance-meta").innerHTML = `
       <span><b>Source</b> Amazon SP-API</span>
       <span><b>ProcessingStatus</b> Open</span>
@@ -1679,6 +1711,28 @@ function renderOverviewPanels() {
   renderSourceOverview();
   renderOverviewExceptionSnapshot();
   renderOverviewActivity();
+  renderBackfillProgress();
+}
+
+function renderBackfillProgress() {
+  const panel = document.getElementById("overview-backfill-progress");
+  const container = document.getElementById("overview-backfill-progress-list");
+  const diagnostics = state.amazonTransactionDiagnostics;
+  panel.hidden = !state.session?.is_admin || !diagnostics;
+  if (panel.hidden) return;
+  const rows = Array.isArray(diagnostics.backfills) ? diagnostics.backfills : [];
+  container.innerHTML = rows.length ? rows.map((row) => `<article class="source-overview-row">
+    <div class="source-overview-name"><strong>${escapeHtml(row.marketplace_name || row.marketplace_id || "Marketplace")}</strong><span>${escapeHtml(row.transaction_status || "Status unavailable")}</span></div>
+    <div><span>Status</span><strong>${escapeHtml(row.status || "not started")}</strong></div>
+    <div><span>Requested range</span><strong>${escapeHtml(formatUtcCoverage(row.overall_start))} — ${escapeHtml(formatUtcCoverage(row.overall_end))}</strong></div>
+    <div><span>Completed range</span><strong>${escapeHtml(formatUtcCoverage(row.completed_start))} — ${escapeHtml(formatUtcCoverage(row.completed_end))}</strong></div>
+    <div><span>Current slice</span><strong>${escapeHtml(formatUtcCoverage(row.current_slice_start))} — ${escapeHtml(formatUtcCoverage(row.current_slice_end))}</strong></div>
+    <div><span>Slices</span><strong>${Number(row.completed_slice_count || 0)} complete · ${Number(row.pending_slice_count || 0)} pending · ${Number(row.failed_slice_count || 0)} failed</strong></div>
+    <div><span>Processed</span><strong>${Number(row.pages_completed || 0).toLocaleString()} pages · ${Number(row.transactions_received || 0).toLocaleString()} transactions</strong></div>
+    <div><span>Conflicts / DB growth</span><strong>${Number(row.status_conflicts || 0).toLocaleString()} · ${Number(row.database_growth_bytes || 0).toLocaleString()} bytes</strong></div>
+    <div><span>Last update</span><strong>${escapeHtml(formatUtcCoverage(row.updated_at))}</strong></div>
+    <div><span>Pause / error</span><strong>${escapeHtml(row.pause_reason || row.last_error || "None")}</strong></div>
+  </article>`).join("") : '<div class="empty-state">Historical backfill has not started. Current transaction visibility remains available with partial coverage.</div>';
 }
 
 function renderCashflowProofSummary() {
@@ -1743,10 +1797,12 @@ function renderSourceOverview() {
 }
 
 function renderOverviewExceptionSnapshot() {
-  const expected = scopedRows(state.unmatchedExpected);
+  const position = state.amazonFinancialPosition?.source_id === state.filters.sourceId
+    ? state.amazonFinancialPosition
+    : null;
   const quality = state.dataQuality || [];
   const items = [
-    ["Open settlement groups", expected.length, "Amazon financial event groups currently being processed."],
+    ["Open settlement groups", Number(position?.openSettlementGroupCount ?? position?.group_count ?? 0), "Amazon financial event groups currently being processed."],
     ["Data-quality checks", quality.length, "Validation items from the latest report generation"],
   ];
   document.getElementById("overview-exception-snapshot").innerHTML = items.map(([label, count, note]) =>

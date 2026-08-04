@@ -121,6 +121,29 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         self.assertEqual(paused["status"], "paused")
         self.assertEqual(resumed["status"], "running")
 
+    def test_completed_historical_slices_mark_coverage_complete(self):
+        checkpoint_start = self.end + timedelta(hours=14)
+        checkpoint_end = checkpoint_start + timedelta(hours=6)
+        self.registry.record_transaction_snapshot(
+            self.source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED", [], checkpoint_end,
+            coverage_start=checkpoint_start, coverage_end=checkpoint_end,
+        )
+        job = self.create_job()
+        client = PagedClient()
+        for _ in range(3):
+            job = self.registry.run_transaction_backfill(job["job_id"], client)
+
+        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+
+        self.assertEqual(job["status"], "completed")
+        self.assertTrue(coverage["is_complete"])
+        self.assertFalse(coverage["has_gaps"])
+        self.assertEqual(coverage["classification"], "COMPLETE_COVERAGE")
+        self.assertEqual(coverage["coverage_percentage"], 100)
+        self.assertEqual(coverage["completed_slice_count"], 3)
+        self.assertEqual(coverage["completed_start"], self.start.isoformat())
+        self.assertEqual(coverage["completed_end"], checkpoint_end.isoformat())
+
     def test_backfill_processes_more_than_100_pages_without_truncation(self):
         class LargeClient(PagedClient):
             def list_transactions_page(self, marketplace_id, status, posted_after, posted_before, next_token=None):

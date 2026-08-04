@@ -454,6 +454,17 @@ nav {
 .availability-section { margin-bottom: 16px; }
 
 .coverage-warning { color: #8a5208 !important; }
+.coverage-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
 .transaction-breakdown { margin-bottom: 16px; }
 .transaction-breakdown summary { cursor: pointer; font-weight: 800; }
 .transaction-breakdown #overview-transaction-composition { margin-top: 12px; }

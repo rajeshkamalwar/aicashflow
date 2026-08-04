@@ -239,6 +239,51 @@ class AmazonSourceRegistryTests(unittest.TestCase):
             self.assertEqual(cad["composition"], {"Product sales": "15.00", "Amazon fees": "-3.00"})
             self.assertNotIn("Other", cad["composition"])
 
+    def test_transaction_visibility_reports_exact_partial_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = self.make_registry(Path(temp_dir))
+            source = registry.upsert({"name": "Canada", "client_id": "a", "client_secret": "b", "refresh_token": "c"})
+            start = datetime(2026, 8, 4, 14, 42, tzinfo=timezone.utc)
+            end = datetime(2026, 8, 4, 20, 48, tzinfo=timezone.utc)
+            registry.record_transaction_snapshot(
+                source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED",
+                [{"transactionId": "T1", "transactionStatus": "DEFERRED", "totalAmount": {"currencyCode": "CAD", "currencyAmount": "21.29"}}],
+                end, coverage_start=start, coverage_end=end,
+            )
+
+            coverage = registry.transaction_visibility(source["id"], "CAD")["coverage"]
+
+            self.assertEqual(coverage["completed_start"], start.isoformat())
+            self.assertEqual(coverage["completed_end"], end.isoformat())
+            self.assertEqual(coverage["last_successful_collection_at"], end.isoformat())
+            self.assertEqual(coverage["classification"], "PARTIAL_COVERAGE")
+            self.assertFalse(coverage["is_complete"])
+            self.assertTrue(coverage["has_gaps"])
+            self.assertIsNone(coverage["coverage_percentage"])
+            self.assertEqual(coverage["completed_slice_count"], 0)
+
+    def test_incremental_overlap_does_not_claim_historical_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = self.make_registry(Path(temp_dir))
+            source = registry.upsert({"name": "Canada", "client_id": "a", "client_secret": "b", "refresh_token": "c"})
+            start = datetime(2026, 8, 4, 14, 42, tzinfo=timezone.utc)
+            end = datetime(2026, 8, 4, 20, 48, tzinfo=timezone.utc)
+            registry.record_transaction_snapshot(
+                source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED", [], end,
+                coverage_start=start, coverage_end=end,
+            )
+            registry.create_transaction_backfill(
+                source_id=source["id"], marketplace_id="CA", marketplace_name="Amazon.ca",
+                currency="CAD", transaction_status="DEFERRED",
+                overall_start=start, overall_end=start.replace(hour=15, minute=42), slice_hours=1,
+            )
+
+            coverage = registry.transaction_visibility(source["id"], "CAD")["coverage"]
+
+            self.assertIsNone(coverage["requested_start"])
+            self.assertEqual(coverage["classification"], "PARTIAL_COVERAGE")
+            self.assertFalse(coverage["is_complete"])
+
     def test_transaction_failure_keeps_report_sync_available_and_marks_partial(self):
         class FakeClient:
             def list_settlement_reports(self):
