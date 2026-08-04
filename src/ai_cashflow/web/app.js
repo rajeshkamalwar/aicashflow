@@ -412,7 +412,7 @@ async function loadData(options = {}) {
         fetchJson("/phase0/uploads"),
         fetchJson("/phase0/runs"),
         fetchJson("/phase0/marketplace-activity"),
-        fetchJson("/phase0/marketplace-ar"),
+        fetchJson("/phase0/marketplace-ar").catch((error) => ({ status: "unavailable", message: error.message })),
         fetchJson("/phase0/source-evidence"),
         fetchJson("/phase0/input-readiness"),
         fetchJson("/phase0/calculation-audit"),

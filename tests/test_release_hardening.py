@@ -39,6 +39,7 @@ class ReleaseHardeningTests(unittest.TestCase):
             "API 401": "showAccessMessage(401)",
             "API 403": "showAccessMessage(403)",
             "API 500": "position?.message ||",
+            "isolated panel API failure": 'fetchJson("/phase0/marketplace-ar").catch',
             "sync success": "Source sync completed with current Amazon data.",
             "sync failure": "Source synchronization",
             "sync reset": "button.textContent = \"Sync selected source\";",
