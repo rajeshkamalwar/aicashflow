@@ -219,7 +219,42 @@ class Phase0Service:
         return self._read_report_csv("unmatched_bank_receipts.csv")
 
     def get_marketplace_activity(self) -> list[dict[str, str]]:
-        return self._read_report_csv("marketplace_activity.csv")
+        return self.get_marketplace_activity_response()["rows"]
+
+    def get_marketplace_activity_response(self) -> dict[str, object]:
+        try:
+            rows = self._read_report_csv("marketplace_activity.csv")
+        except (OSError, UnicodeError, csv.Error):
+            return {
+                "status": "unavailable",
+                "rows": [],
+                "diagnostics": {
+                    "invalid_marketplace_activity_rows": True,
+                    "skipped_row_count": 0,
+                    "validation_reason": "marketplace_activity_unavailable",
+                    "validation_reasons": ["marketplace_activity_unavailable"],
+                },
+            }
+
+        required = ("posted_at", "type", "marketplace", "currency", "total")
+        valid = []
+        reasons = []
+        for row in rows:
+            missing = [field for field in required if not str(row.get(field) or "").strip()]
+            if missing:
+                reasons.append("empty_row" if not any(row.values()) else "missing_required_fields")
+                continue
+            valid.append({key: str(value) for key, value in row.items() if key is not None and value is not None})
+        return {
+            "status": "partial" if reasons else "ready",
+            "rows": valid,
+            "diagnostics": {
+                "invalid_marketplace_activity_rows": bool(reasons),
+                "skipped_row_count": len(reasons),
+                "validation_reason": reasons[0] if reasons else None,
+                "validation_reasons": sorted(set(reasons)),
+            },
+        }
 
     def get_marketplace_ar(self) -> dict[str, object]:
         return summarize_marketplace_ar(

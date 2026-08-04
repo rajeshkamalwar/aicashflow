@@ -29,6 +29,7 @@ const state = {
   uploads: [],
   runs: [],
   marketplaceActivity: [],
+  marketplaceActivityStatus: null,
   marketplaceAr: null,
   sourceEvidence: [],
   inputReadiness: null,
@@ -411,7 +412,9 @@ async function loadData(options = {}) {
         fetchJson("/phase0/unmatched-receipts"),
         fetchJson("/phase0/uploads"),
         fetchJson("/phase0/runs"),
-        fetchJson("/phase0/marketplace-activity"),
+        fetchJson("/phase0/marketplace-activity").catch((error) => ({
+          status: "unavailable", rows: [], diagnostics: { validation_reason: error.message },
+        })),
         fetchJson("/phase0/marketplace-ar").catch((error) => ({ status: "unavailable", message: error.message })),
         fetchJson("/phase0/source-evidence"),
         fetchJson("/phase0/input-readiness"),
@@ -431,7 +434,12 @@ async function loadData(options = {}) {
     state.unmatchedReceipts = Array.isArray(receipts) ? receipts : [];
     state.uploads = Array.isArray(uploads) ? uploads : [];
     state.runs = Array.isArray(runs) ? runs : [];
-    state.marketplaceActivity = Array.isArray(marketplaceActivity) ? marketplaceActivity : [];
+    state.marketplaceActivity = Array.isArray(marketplaceActivity)
+      ? marketplaceActivity
+      : Array.isArray(marketplaceActivity?.rows) ? marketplaceActivity.rows : [];
+    state.marketplaceActivityStatus = Array.isArray(marketplaceActivity)
+      ? { status: "ready", diagnostics: {} }
+      : marketplaceActivity;
     state.marketplaceAr = marketplaceAr;
     state.sourceEvidence = Array.isArray(sourceEvidence) ? sourceEvidence : [];
     state.inputReadiness = inputReadiness;
@@ -1084,7 +1092,7 @@ function renderTransactionVisibility(position) {
   renderRows("overview-completed-payout", completed.map(([currency, row]) => ({ currency, amount: row?.amount })));
   setText("overview-completed-payout-note", completed.length
     ? completed.map(([, row]) => `${row.transfer_date || "Date unavailable"} · ${row.financial_event_group_id || "ID unavailable"}`).join(" · ")
-    : "No canonical Closed financial event group is available in this scope.");
+    : "No successful, positive Closed transfer is available in this scope.");
 
   const coverageStarts = entries.map(([, row]) => row?.coverage_start).filter(Boolean).sort();
   const coverageEnds = entries.map(([, row]) => row?.coverage_end).filter(Boolean).sort();
@@ -1748,6 +1756,11 @@ function renderOverviewExceptionSnapshot() {
 
 function renderOverviewActivity() {
   const container = document.getElementById("overview-activity-list");
+  if (state.marketplaceActivityStatus?.status === "unavailable") {
+    setText("overview-activity-count", "Unavailable");
+    container.innerHTML = `<div class="empty-state">Marketplace activity is temporarily unavailable. Other financial data remains available.</div>`;
+    return;
+  }
   const rows = scopedRows(state.marketplaceActivity)
     .slice()
     .sort((a, b) => (rowDate(b)?.getTime() || 0) - (rowDate(a)?.getTime() || 0));
@@ -2768,7 +2781,9 @@ async function deleteUpload(fileName, btn) {
     }
     state.uploads = await fetchJson("/phase0/uploads");
     state.summary = await fetchJson("/phase0/summary");
-    state.marketplaceActivity = await fetchJson("/phase0/marketplace-activity");
+    const activity = await fetchJson("/phase0/marketplace-activity");
+    state.marketplaceActivity = Array.isArray(activity) ? activity : (activity.rows || []);
+    state.marketplaceActivityStatus = Array.isArray(activity) ? { status: "ready" } : activity;
     renderUploads();
     setText("uploads-count", state.uploads.length);
     render();

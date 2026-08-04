@@ -1,6 +1,7 @@
 """Cashflow reconciliation report generation."""
 
 import csv
+import tempfile
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
@@ -362,7 +363,11 @@ def _write_unmatched_receipts(path: Path, receipts: list[BankReceipt]) -> None:
 def _write_marketplace_activity(
     path: Path, transactions: list[AmazonTransaction]
 ) -> None:
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
+        temporary = Path(handle.name)
         writer = csv.writer(handle)
         writer.writerow(
             [
@@ -395,6 +400,7 @@ def _write_marketplace_activity(
                     transaction.source_file,
                 ]
             )
+    temporary.replace(path)
 
 
 def _write_source_evidence(

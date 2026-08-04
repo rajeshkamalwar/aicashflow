@@ -509,6 +509,33 @@ class AmazonSpApiClientTests(unittest.TestCase):
             Decimal(position["amounts"]["current_balance"]),
         )
 
+    def test_completed_payouts_require_successful_positive_closed_transfers(self):
+        groups = [
+            self._group("CAD-OPEN", "Open", "10.00", currency="CAD"),
+            self._group("CAD-SUCCESS", "Closed", "123025.62", currency="CAD", FundTransferStatus="Succeeded", FundTransferDate="2026-07-31T10:14:03Z"),
+            self._group("BRL-SUCCESS", "Closed", "120.00", currency="BRL", FundTransferStatus="Succeeded", FundTransferDate="2026-08-01T11:44:49Z"),
+            self._group("BRL-PENDING", "Closed", "18598.84", currency="BRL", FundTransferStatus="Processing", FundTransferDate="2026-08-04T11:44:49Z"),
+            self._group("USD-FAILED", "Closed", "10.00", currency="USD", FundTransferStatus="Failed", FundTransferDate="2026-08-03T20:00:47Z"),
+            self._group("EUR-ZERO", "Closed", "0.00", currency="EUR", FundTransferStatus="Succeeded"),
+            self._group("GBP-CHARGE", "Closed", "-4.00", currency="GBP", FundTransferStatus="Succeeded"),
+        ]
+        now = datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+        payouts = AmazonSpApiClient(AmazonSpApiConfig("client", "secret", "refresh"))._completed_payouts(groups, now)
+        _, diagnostics = AmazonSpApiClient._normalize_financial_event_groups(groups, now)
+
+        self.assertEqual(set(payouts), {"BRL", "CAD"})
+        self.assertEqual(payouts["CAD"]["amount"], "123025.62")
+        self.assertEqual(payouts["BRL"]["amount"], "120.00")
+        classifications = {row["financialEventGroupId"]: row["classification"] for row in diagnostics}
+        self.assertEqual(classifications["CAD-SUCCESS"], "COMPLETED_PAYOUT")
+        self.assertEqual(classifications["BRL-SUCCESS"], "COMPLETED_PAYOUT")
+        self.assertEqual(classifications["BRL-PENDING"], "CLOSED_GROUP_TRANSFER_PENDING")
+        self.assertEqual(classifications["USD-FAILED"], "FAILED_TRANSFER")
+        self.assertEqual(classifications["EUR-ZERO"], "ZERO_VALUE_SETTLEMENT")
+        self.assertEqual(classifications["GBP-CHARGE"], "COMPLETED_CHARGE")
+        self.assertEqual(classifications["CAD-OPEN"], "OPEN_SETTLEMENT_GROUP")
+
     def test_canonical_selection_is_response_order_independent(self):
         observations = [
             self._group(

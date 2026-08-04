@@ -411,6 +411,42 @@ class Phase0ServiceTests(unittest.TestCase):
         self.assertEqual(activity[0]["status"], "Deferred")
         self.assertEqual(activity[0]["source_file"], "amazon_report.csv")
 
+    def test_marketplace_activity_response_skips_incomplete_rows_without_fabricating_money(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "marketplace_activity.csv").write_text(
+                "posted_at,source_id,settlement_id,type,marketplace,currency,total,status,release_date,order_id,source_file\n"
+                "2026-08-04T19:34:01Z,,,,,,,,,,\n"
+                "2026-08-04T19:35:01Z,source-1,group-1,Order,amazon.ca,CAD,12.34,Deferred,,order-1,report.csv\n"
+                "2026-08-04T19:36:01Z,source-1,group-2,Order,amazon.ca,CAD,,Deferred,,order-2,report.csv\n",
+                encoding="utf-8",
+            )
+            service = Phase0Service(AppConfig(
+                samples_dir=root / "samples",
+                reports_dir=reports,
+                database_path=root / "ops.db",
+            ))
+
+            response = service.get_marketplace_activity_response()
+
+        self.assertEqual(response["status"], "partial")
+        self.assertEqual([row["total"] for row in response["rows"]], ["12.34"])
+        self.assertEqual(response["diagnostics"]["skipped_row_count"], 2)
+        self.assertIn("missing_required_fields", response["diagnostics"]["validation_reasons"])
+        self.assertNotIn("0", [row["total"] for row in response["rows"]])
+
+    def test_marketplace_activity_response_reports_unavailable_file_without_raising(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = make_service(Path(temp_dir))
+            with patch.object(service, "run_report", side_effect=OSError("unavailable")):
+                response = service.get_marketplace_activity_response()
+
+        self.assertEqual(response["status"], "unavailable")
+        self.assertEqual(response["rows"], [])
+        self.assertEqual(response["diagnostics"]["validation_reason"], "marketplace_activity_unavailable")
+
     def test_source_evidence_explains_loaded_file_and_brd_gaps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

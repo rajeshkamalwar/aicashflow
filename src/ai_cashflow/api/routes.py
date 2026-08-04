@@ -619,12 +619,12 @@ def phase0_unmatched_receipts(
     return service.get_unmatched_receipts()
 
 
-@router.get("/phase0/marketplace-activity", response_model=list[dict[str, str]])
+@router.get("/phase0/marketplace-activity", response_model=dict[str, object])
 def phase0_marketplace_activity(
     _: None = Depends(require_api_key),
     service: Phase0Service = Depends(get_phase0_service),
-) -> list[dict[str, str]]:
-    return service.get_marketplace_activity()
+) -> dict[str, object]:
+    return service.get_marketplace_activity_response()
 
 
 @router.get("/phase0/marketplace-ar", response_model=dict[str, object])

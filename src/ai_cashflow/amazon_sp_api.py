@@ -312,8 +312,59 @@ class AmazonSpApiClient:
                 "currency": cls._group_currency(selected) or None,
                 "retrievalTimestamp": retrieval_timestamp,
                 "observationCount": len(group_observations),
+                "classification": cls._closed_group_classification(selected),
             })
         return canonical, diagnostics
+
+    @classmethod
+    def _closed_group_classification(cls, group: dict[str, object]) -> str:
+        processing_status = str(group.get("ProcessingStatus", "")).strip().lower()
+        if processing_status != "closed":
+            return "OPEN_SETTLEMENT_GROUP" if processing_status == "open" else "SETTLEMENT_STATUS_UNKNOWN"
+        total = group.get("OriginalTotal")
+        if not isinstance(total, dict) or not str(total.get("CurrencyCode") or "").strip():
+            return "CLOSED_SETTLEMENT_STATUS_UNKNOWN"
+        try:
+            amount = Decimal(str(total["CurrencyAmount"]))
+        except (KeyError, TypeError, InvalidOperation):
+            return "CLOSED_SETTLEMENT_STATUS_UNKNOWN"
+        if amount == 0:
+            return "ZERO_VALUE_SETTLEMENT"
+        if amount < 0:
+            return "COMPLETED_CHARGE"
+        transfer_status = str(group.get("FundTransferStatus", "")).strip().lower()
+        if transfer_status in {"succeeded", "transferred", "transfered"}:
+            return "COMPLETED_PAYOUT"
+        if transfer_status in {"failed", "cancelled"}:
+            return "FAILED_TRANSFER"
+        if transfer_status in {"processing", "pending"}:
+            return "CLOSED_GROUP_TRANSFER_PENDING"
+        return "CLOSED_SETTLEMENT_STATUS_UNKNOWN"
+
+    def _completed_payouts(
+        self, groups: list[dict[str, object]], now: datetime
+    ) -> dict[str, dict[str, object]]:
+        payouts: dict[str, dict[str, object]] = {}
+        for group in groups:
+            if self._closed_group_classification(group) != "COMPLETED_PAYOUT":
+                continue
+            amount, currency = self._money(group.get("OriginalTotal"), "completed payout total")
+            candidate = {
+                "amount": self._format_money(amount),
+                "currency": currency,
+                "transfer_date": group.get("FundTransferDate"),
+                "transfer_status": group.get("FundTransferStatus"),
+                "financial_event_group_id": self._mask_identifier(
+                    str(group.get("FinancialEventGroupId") or "")
+                ),
+                "classification": "COMPLETED_PAYOUT",
+                "_key": self._group_observation_key(group, now),
+            }
+            if currency not in payouts or candidate["_key"] > payouts[currency]["_key"]:
+                payouts[currency] = candidate
+        for payout in payouts.values():
+            payout.pop("_key", None)
+        return payouts
 
     @classmethod
     def _settlement_status(
@@ -429,25 +480,7 @@ class AmazonSpApiClient:
                     calculation_method=None,
                     availability_reason=unavailable_reason,
                 ))
-        recent_completed_payouts = {}
-        for group in canonical:
-            if str(group.get("ProcessingStatus", "")).lower() != "closed":
-                continue
-            amount, currency = self._money(group.get("OriginalTotal"), "closed financial event group total")
-            candidate = {
-                "amount": self._format_money(amount),
-                "currency": currency,
-                "transfer_date": group.get("FundTransferDate"),
-                "transfer_status": group.get("FundTransferStatus"),
-                "financial_event_group_id": self._mask_identifier(
-                    str(group.get("FinancialEventGroupId") or "")
-                ),
-                "_key": self._group_observation_key(group, now),
-            }
-            if currency not in recent_completed_payouts or candidate["_key"] > recent_completed_payouts[currency]["_key"]:
-                recent_completed_payouts[currency] = candidate
-        for payout in recent_completed_payouts.values():
-            payout.pop("_key", None)
+        recent_completed_payouts = self._completed_payouts(canonical, now)
         return {
             "status": "ready" if balances else "unavailable",
             "mode": "amazon_open_balances",
@@ -579,16 +612,6 @@ class AmazonSpApiClient:
             open_groups,
             key=lambda row: self._group_observation_key(row, now),
         )
-        closed_groups = [
-            row for row in scoped_groups
-            if str(row.get("ProcessingStatus", "")).strip().lower() == "closed"
-        ]
-        latest_closed = max(
-            closed_groups,
-            key=lambda row: self._group_observation_key(row, now),
-            default=None,
-        )
-
         standard_balance = Decimal("0")
         source_currency = scope_currency or ""
         for current_open_group in open_groups:
@@ -612,17 +635,10 @@ class AmazonSpApiClient:
             raise AmazonSpApiError(
                 "Amazon did not return the current settlement period start."
             )
-        recent_payout = Decimal("0")
-        recent_payout_date = None
-        recent_payout_status = None
-        if latest_closed is not None:
-            recent_payout, recent_currency = self._money(
-                latest_closed.get("OriginalTotal"),
-                "latest closed financial event group total",
-            )
-            self._require_currency(source_currency, recent_currency)
-            recent_payout_date = latest_closed.get("FundTransferDate")
-            recent_payout_status = latest_closed.get("FundTransferStatus")
+        completed_payout = self._completed_payouts(scoped_groups, now).get(source_currency)
+        recent_payout = Decimal(str(completed_payout["amount"])) if completed_payout else None
+        recent_payout_date = completed_payout.get("transfer_date") if completed_payout else None
+        recent_payout_status = completed_payout.get("transfer_status") if completed_payout else None
 
         source_amounts = {
             "standard_balance": standard_balance,
@@ -688,7 +704,7 @@ class AmazonSpApiClient:
                 calculation_method=None,
                 availability_reason=reason,
             ))
-        if latest_closed is not None:
+        if completed_payout is not None:
             financial_values.append(self._financial_value(
                 value_type="COMPLETED_PAYOUT",
                 amount=recent_payout,
@@ -711,15 +727,7 @@ class AmazonSpApiClient:
             "recent_payout_date": recent_payout_date,
             "recent_payout_status": recent_payout_status,
             "deferred_transaction_count": None,
-            "recent_completed_payout": ({
-                "amount": self._format_money(recent_payout),
-                "currency": source_currency,
-                "transfer_date": recent_payout_date,
-                "transfer_status": recent_payout_status,
-                "financial_event_group_id": self._mask_identifier(
-                    str(latest_closed.get("FinancialEventGroupId") or "")
-                ),
-            } if latest_closed is not None else None),
+            "recent_completed_payout": completed_payout,
             "group_count": settlement_status["openSettlementGroupCount"],
             **settlement_status,
             "funds_available_status": "unavailable",
