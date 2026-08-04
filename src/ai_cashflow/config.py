@@ -452,15 +452,21 @@ class TenantConfig:
 
 @dataclass
 class AppConfig:
-    samples_dir: Path = ROOT_DIR / "data" / "samples"
-    reports_dir: Path = ROOT_DIR / "reports" / "phase0"
+    samples_dir: Path = field(default_factory=lambda: _path_env(
+        "AI_CASHFLOW_SAMPLES_DIR", ROOT_DIR / "data" / "samples"
+    ))
+    reports_dir: Path = field(default_factory=lambda: _path_env(
+        "AI_CASHFLOW_REPORTS_DIR", ROOT_DIR / "reports" / "phase0"
+    ))
     marketplace_ar_registry_path: Path = CONFIG_DIR / "marketplace_ar_sources.csv"
     marketplace_ar_fx_path: Path = CONFIG_DIR / "marketplace_ar_fx_rates.csv"
     marketplace_ar_ingest_mode: str = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_MARKETPLACE_AR_INGEST_MODE", "hybrid"
     ).strip().lower())
     tenant: TenantConfig = field(default_factory=lambda: load_tenant_config())
-    tenant_config_path: Path = CONFIG_DIR / "tenant.local.json"
+    tenant_config_path: Path = field(default_factory=lambda: _path_env(
+        "AI_CASHFLOW_TENANT_CONFIG_PATH", CONFIG_DIR / "tenant.local.json"
+    ))
     database_path: Path | None = None
     environment: str = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_ENV", "local"
@@ -509,7 +515,9 @@ class AppConfig:
 
 
 def load_tenant_config() -> TenantConfig:
-    local_path = CONFIG_DIR / "tenant.local.json"
+    local_path = _path_env(
+        "AI_CASHFLOW_TENANT_CONFIG_PATH", CONFIG_DIR / "tenant.local.json"
+    )
     example_path = CONFIG_DIR / "tenant.example.json"
     if local_path.exists():
         return TenantConfig.from_file(local_path)

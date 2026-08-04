@@ -112,20 +112,110 @@ Development bypass is permitted only with both
 `AI_CASHFLOW_ENV=development` and `AI_CASHFLOW_DEV_AUTH_BYPASS=true`, and only
 for direct loopback requests. It is rejected in test and production.
 
-### Safe Deployment Sequence
+### Production Release Prerequisites
 
-1. Back up the current application revision, environment file, Nginx vhost, and database.
-2. Create the locked `aicashflow` service account and grant only the required database/report paths.
-3. Install the protected environment, htpasswd, and assertion include files.
-4. Upload the reviewed commit and run `bash deploy.sh`.
-5. Run `nginx -t`, install `nginx_vhost.conf`, reload Nginx, and verify `/health`.
-6. Verify browser login, `/auth/session`, administrator denial/allow behavior, and one machine readiness request.
-7. Leave `AI_CASHFLOW_API_KEY_PREVIOUS` set only for the planned rotation window.
+- Canonical origin: `https://www.aicashflow.pro`. HTTP on either hostname and
+  HTTPS on the apex hostname redirect to it.
+- Python 3.11, Git, Nginx, systemd, curl, and read-only access from the server
+  to the approved private Git remote.
+- The exact release commit must already exist on that remote. A commit that
+  exists only in a developer worktree is not deployable.
+- `/etc/aicashflow/aicashflow.env`: owner `root:aicashflow`, mode `0640`.
+- `/etc/nginx/aicashflow/proxy-assertion.conf`: owner `root:root`, mode `0600`.
+- `/etc/nginx/.htpasswd-aicashflow`: owner `root:www-data`, mode `0640`.
+- `/var/lib/aicashflow/{samples,reports,config}` must be readable and writable
+  by `aicashflow`; the database path must be absolute and its parent writable.
+- The environment file must include the canonical public origin, the external
+  data paths from `.env.example`, an approved smoke-test source ID, and a
+  smoke-only Basic Auth credential. These values are never printed by scripts.
+- The certificate paths referenced by `nginx_vhost.conf` must contain a valid
+  certificate for both `aicashflow.pro` and `www.aicashflow.pro`.
+- Before the first Phase 1C deployment, a separately reviewed one-time
+  migration must place the verified Phase 1B release under
+  `/opt/aicashflow/releases` and point `/opt/aicashflow/current` to it. The
+  deploy script fails closed when no valid current release exists, because an
+  automatic rollback would otherwise be impossible.
 
-Rollback by restoring the prior revision and prior protected configuration,
-restarting `aicashflow`, testing `nginx -t`, and reloading Nginx. Restore the
-database backup only if a separate data migration was performed; Phase 1B has
-no schema migration.
+Do not paste environment-file contents, assertion include contents, API keys,
+master keys, smoke credentials, or full `nginx -T` output into tickets, logs,
+or copied terminal output.
+
+### Locked Dependencies
+
+Production installs `requirements.lock` with exact versions and SHA-256 hashes.
+Regenerate it only in a reviewed Python 3.11 environment:
+
+```bash
+python -m pip install "pip<26" pip-tools==7.5.1
+python -m piptools compile --generate-hashes --strip-extras --output-file=requirements.lock requirements.txt
+python -m pip install --require-hashes -r requirements.lock
+```
+
+The production server must use `requirements.lock`; `requirements.txt` remains
+the human-maintained input and is not installed directly during a release.
+
+### Commit-Pinned Deployment
+
+The release layout is immutable application code plus external mutable data:
+
+```text
+/opt/aicashflow/releases/<full-commit>
+/opt/aicashflow/current  -> active release
+/opt/aicashflow/previous -> preserved prior release
+/var/lib/aicashflow      -> database, reports, samples, tenant configuration
+```
+
+After reviewing and pushing the clean Phase 1C commit to the approved private
+remote:
+
+```bash
+sudo bash deploy.sh \
+  --commit <full-40-character-commit> \
+  --repository <approved-private-git-url>
+```
+
+The script clones the requested commit into a temporary clean checkout,
+verifies the exact revision and clean tree, archives only committed files,
+installs the hashed lock in a new virtual environment, validates production
+configuration as `aicashflow`, verifies the candidate systemd unit, and only
+then atomically changes `/opt/aicashflow/current`.
+
+After restart it checks the exact health body, service state, Basic Auth,
+authenticated readiness, the JavaScript release ID, and the financial-position
+API. Any failure restores the previous symlink and restarts the old release.
+No older release is deleted automatically.
+
+HTML is served with `Cache-Control: no-store`. JavaScript and CSS URLs contain
+the full release ID and versioned assets are immutable, so authentication-code
+changes do not require a browser hard refresh. This application has no service
+worker.
+
+### Read-Only Production Verification
+
+Run without changing production state:
+
+```bash
+sudo bash /opt/aicashflow/current/verify-production.sh
+```
+
+It emits safe PASS/FAIL labels for configuration shape, protected metadata,
+systemd, loopback binding, Nginx, redirects, size limits, writable paths, and
+the active release. It never prints protected values and intentionally does
+not run `nginx -T`.
+
+### Rollback
+
+```bash
+sudo bash /opt/aicashflow/current/rollback.sh
+```
+
+Rollback atomically restores `/opt/aicashflow/previous`, restarts the service,
+and checks health. The failed release remains under `/opt/aicashflow/releases`
+for investigation. Phase 1C has no database migration and does not modify the
+database during deployment or rollback; releases therefore assume the same
+Phase 1B database schema.
+
+Leave `AI_CASHFLOW_API_KEY_PREVIOUS` set only for the planned rotation window.
 
 Operational history is stored in SQLite:
 
@@ -133,8 +223,11 @@ Operational history is stored in SQLite:
 - report run history;
 - audit events.
 
-Uploads are limited to CSV files in approved categories and are rejected when
-they exceed `AI_CASHFLOW_MAX_UPLOAD_BYTES`.
+Uploads and JSON requests are rejected with `413` when they exceed
+`AI_CASHFLOW_MAX_UPLOAD_BYTES` (10 MiB in the production example). Nginx uses
+`client_max_body_size 11m` for transport overhead. JSON API ingestion is also
+limited to 10,000 object rows; unsupported report types and malformed rows are
+rejected with `422` before any data is written.
 
 ## White-Label Tenant Configuration
 

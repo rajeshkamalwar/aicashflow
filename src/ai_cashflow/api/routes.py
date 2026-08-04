@@ -3,6 +3,7 @@
 from pathlib import Path
 import json
 import os
+import re
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -32,6 +33,34 @@ router = APIRouter()
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 ROOT_DIR = Path(__file__).resolve().parents[3]
 SCRAPED_DIR = ROOT_DIR / "data" / "scraped" / "seller-central"
+API_INGEST_ROW_LIMIT = 10_000
+SUPPORTED_API_REPORT_TYPES = frozenset({
+    "transactions",
+    "settlements",
+    "payouts",
+    "bank_receipts",
+    "marketplace_ar",
+})
+
+
+def _safe_build_value(name: str, filename: str, default: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        path = ROOT_DIR / filename
+        value = path.read_text(encoding="utf-8").strip() if path.is_file() else default
+    return value if re.fullmatch(r"[A-Za-z0-9._:+-]+", value) else default
+
+
+def _app_shell() -> HTMLResponse:
+    release_id = _safe_build_value(
+        "AI_CASHFLOW_RELEASE_ID", "RELEASE_ID", "development"
+    )
+    built_at = _safe_build_value(
+        "AI_CASHFLOW_BUILD_TIMESTAMP", "BUILD_TIMESTAMP", "unknown"
+    )
+    html = (WEB_DIR / "app.html").read_text(encoding="utf-8")
+    html = html.replace("__RELEASE_ID__", release_id).replace("__BUILD_TIMESTAMP__", built_at)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 def get_phase0_service() -> Phase0Service:
@@ -73,13 +102,13 @@ def ready(_: Principal = Depends(require_administrator_or_machine)) -> dict[str,
 
 
 @router.get("/", response_class=HTMLResponse)
-def root(_: Principal = Depends(require_proxy_user)) -> FileResponse:
-    return FileResponse(WEB_DIR / "app.html", media_type="text/html")
+def root(_: Principal = Depends(require_proxy_user)) -> HTMLResponse:
+    return _app_shell()
 
 
 @router.get("/app", response_class=HTMLResponse)
-def app_shell(_: Principal = Depends(require_proxy_user)) -> FileResponse:
-    return FileResponse(WEB_DIR / "app.html", media_type="text/html")
+def app_shell(_: Principal = Depends(require_proxy_user)) -> HTMLResponse:
+    return _app_shell()
 
 
 @router.get("/auth/session", response_model=dict[str, object])
@@ -556,11 +585,20 @@ def phase0_api_ingest(
     """
     source_name = str(payload.get("source_name", "api_source"))
     rows = payload.get("rows", [])
-    report_type = str(payload.get("report_type", "transactions"))
+    report_type = (
+        str(payload.get("report_type", "transactions"))
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
     if not isinstance(rows, list):
-        raise HTTPException(status_code=400, detail="'rows' must be a JSON array of objects.")
-    if rows and not isinstance(rows[0], dict):
-        raise HTTPException(status_code=400, detail="Each item in 'rows' must be a JSON object.")
+        raise HTTPException(status_code=422, detail="'rows' must be a JSON array of objects.")
+    if len(rows) > API_INGEST_ROW_LIMIT:
+        raise HTTPException(status_code=422, detail=f"'rows' cannot exceed {API_INGEST_ROW_LIMIT} items.")
+    if any(not isinstance(row, dict) for row in rows):
+        raise HTTPException(status_code=422, detail="Each item in 'rows' must be a JSON object.")
+    if report_type not in SUPPORTED_API_REPORT_TYPES:
+        raise HTTPException(status_code=422, detail="Unsupported report type.")
     try:
         return service.ingest_api_data(source_name, rows, report_type)
     except ValueError as exc:

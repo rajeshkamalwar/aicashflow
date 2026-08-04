@@ -101,13 +101,41 @@ def create_app(security_settings: SecuritySettings | None = None) -> FastAPI:
     app.state.security_settings = settings
 
     @app.middleware("http")
-    async def protect_static_assets(request: Request, call_next):
+    async def enforce_request_policy(request: Request, call_next):
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip()
+        if content_type == "application/json":
+            try:
+                declared_size = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                declared_size = 0
+            if declared_size > settings.max_upload_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "JSON request is too large."},
+                )
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "JSON request is too large."},
+                    )
+                chunks.append(chunk)
+            request._body = b"".join(chunks)
         if request.url.path == "/assets" or request.url.path.startswith("/assets/"):
             try:
                 authenticate_proxy(request, settings)
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path == "/assets" or request.url.path.startswith("/assets/"):
+            if request.query_params.get("v"):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+        return response
 
     web_dir = Path(__file__).resolve().parents[1] / "web"
     app.mount("/assets", StaticFiles(directory=web_dir), name="assets")
