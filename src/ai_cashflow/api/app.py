@@ -5,10 +5,12 @@ from contextlib import asynccontextmanager, suppress
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ai_cashflow.api.routes import router
+from ai_cashflow.api.security import SecuritySettings, authenticate_proxy
 from ai_cashflow.amazon_sp_api import AmazonSpApiClient
 from ai_cashflow.api.services import Phase0Service
 from ai_cashflow.config import AppConfig
@@ -73,7 +75,8 @@ async def _amazon_scheduler() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_: FastAPI):
+async def _lifespan(app: FastAPI):
+    app.state.security_settings.validate_startup()
     task = asyncio.create_task(_amazon_scheduler()) if os.getenv("AI_CASHFLOW_MASTER_KEY") else None
     try:
         yield
@@ -84,8 +87,28 @@ async def _lifespan(_: FastAPI):
                 await task
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="AI Cashflow API", version="0.1.0", lifespan=_lifespan)
+def create_app(security_settings: SecuritySettings | None = None) -> FastAPI:
+    settings = security_settings or SecuritySettings.from_env()
+    production = settings.environment == "production"
+    app = FastAPI(
+        title="AI Cashflow API",
+        version="0.1.0",
+        lifespan=_lifespan,
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
+    )
+    app.state.security_settings = settings
+
+    @app.middleware("http")
+    async def protect_static_assets(request: Request, call_next):
+        if request.url.path == "/assets" or request.url.path.startswith("/assets/"):
+            try:
+                authenticate_proxy(request, settings)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return await call_next(request)
+
     web_dir = Path(__file__).resolve().parents[1] / "web"
     app.mount("/assets", StaticFiles(directory=web_dir), name="assets")
     app.include_router(router)

@@ -6,10 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import csv
 
-from fastapi.testclient import TestClient
 from cryptography.fernet import Fernet
 
-from ai_cashflow.api.app import create_app
 from ai_cashflow.api.routes import (
     get_amazon_integration_manager,
     get_amazon_source_registry,
@@ -18,9 +16,14 @@ from ai_cashflow.api.routes import (
 from ai_cashflow.api.services import Phase0Service
 from ai_cashflow.config import AppConfig
 from ai_cashflow.integrations import AmazonIntegrationManager, AmazonSourceRegistry
+from security_helpers import create_test_app, machine_headers, test_client as TestClient
 
 
 PHASE0_FIXTURES = Path(__file__).resolve().parent / "fixtures/phase0_samples"
+
+
+def create_app():
+    return create_test_app()
 
 
 class ApiAppTests(unittest.TestCase):
@@ -81,26 +84,22 @@ class ApiAppTests(unittest.TestCase):
         app = create_app()
         app.dependency_overrides[get_phase0_service] = lambda: FakeService()
         client = TestClient(app)
+        unauthenticated = TestClient(app, authenticated=False)
         statement = (
             "receipt_id,bank_account,currency,receipt_date,amount,reference\n"
             "R1,OPERATING,USD,2026-07-02,37.85,GROUP-1\n"
         )
-        with patch.dict("os.environ", {"AI_CASHFLOW_ADMIN_AUTH_REQUIRED": "true"}):
-            denied = client.post(
-                "/admin/reconciliation/bank-statements",
-                files={"file": ("statement.csv", statement, "text/csv")},
-                data={"bank_source": "Main bank"},
-            )
-            imported = client.post(
-                "/admin/reconciliation/bank-statements",
-                files={"file": ("statement.csv", statement, "text/csv")},
-                data={"bank_source": "Main bank"},
-                headers={"X-Admin-User": "superadmin"},
-            )
-            run = client.post(
-                "/admin/reconciliation/proofs/run",
-                headers={"X-Admin-User": "superadmin"},
-            )
+        denied = unauthenticated.post(
+            "/admin/reconciliation/bank-statements",
+            files={"file": ("statement.csv", statement, "text/csv")},
+            data={"bank_source": "Main bank"},
+        )
+        imported = client.post(
+            "/admin/reconciliation/bank-statements",
+            files={"file": ("statement.csv", statement, "text/csv")},
+            data={"bank_source": "Main bank"},
+        )
+        run = client.post("/admin/reconciliation/proofs/run")
         summary = client.get("/phase0/reconciliation/proof")
         items = client.get(
             "/phase0/reconciliation/proof/items",
@@ -240,12 +239,8 @@ class ApiAppTests(unittest.TestCase):
                 Path(temp_dir) / "ops.db", Fernet.generate_key().decode()
             )
             app.dependency_overrides[get_amazon_integration_manager] = lambda: manager
-            client = TestClient(app)
-            with patch.dict("os.environ", {"AI_CASHFLOW_ADMIN_AUTH_REQUIRED": "true"}):
-                denied = client.get("/admin/integrations/amazon")
-                allowed = client.get(
-                    "/admin/integrations/amazon", headers={"X-Admin-User": "superadmin"}
-                )
+            denied = TestClient(app, authenticated=False).get("/admin/integrations/amazon")
+            allowed = TestClient(app).get("/admin/integrations/amazon")
 
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
@@ -418,8 +413,8 @@ class ApiAppTests(unittest.TestCase):
                 }],
             }
 
-            first = client.post("/phase0/api-ingest", json=payload)
-            second = client.post("/phase0/api-ingest", json=payload)
+            first = client.post("/phase0/api-ingest", json=payload, headers=machine_headers())
+            second = client.post("/phase0/api-ingest", json=payload, headers=machine_headers())
             unknown_payload = {
                 **payload,
                 "rows": [{
@@ -428,7 +423,7 @@ class ApiAppTests(unittest.TestCase):
                     "account_id": "unknown-source",
                 }],
             }
-            rejected = client.post("/phase0/api-ingest", json=unknown_payload)
+            rejected = client.post("/phase0/api-ingest", json=unknown_payload, headers=machine_headers())
             summary = client.get("/phase0/marketplace-ar")
 
         self.assertEqual(first.status_code, 200)

@@ -18,6 +18,7 @@ const viewAliases = {
 };
 
 const state = {
+  session: null,
   tenant: null,
   summary: null,
   exceptions: {},
@@ -73,7 +74,7 @@ async function syncFromApi() {
   }
   try {
     const previousSourceFingerprint = sourceSyncFingerprint();
-    const sources = await fetchJson("/admin/integrations/amazon/sources");
+    const sources = await fetchJson("/phase0/sources");
     const sourceChanged = previousSourceFingerprint !== sourceSyncFingerprint(sources);
     state.amazonSources = sources;
     if (sourceChanged) await loadData({ background: true });
@@ -95,7 +96,7 @@ async function syncFromApi() {
 }
 
 function startApiPolling() {
-  if (_pollInterval || !hasApiSources()) return;
+  if (_authenticationStopped || _pollInterval || !hasApiSources()) return;
   _pollInterval = setInterval(syncFromApi, POLL_INTERVAL_MS);
   updateLiveIndicator();
 }
@@ -193,7 +194,7 @@ document.getElementById("run-report").addEventListener("click", async () => {
   btn.textContent = "Refreshing...";
   status.textContent = "Refreshing cash view";
   try {
-    await fetch("/phase0/run-report", { method: "POST" });
+    await apiFetch("/phase0/run-report", { method: "POST" });
     await loadData();
   } finally {
     btn.disabled = false;
@@ -238,7 +239,7 @@ document.getElementById("clear-runs-btn").addEventListener("click", async () => 
   btn.disabled = true;
   btn.textContent = "Clearing…";
   try {
-    const res = await fetch("/phase0/runs", { method: "DELETE" });
+    const res = await apiFetch("/phase0/runs", { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       alert(err.detail || "Clear failed");
@@ -383,6 +384,9 @@ async function loadData(options = {}) {
   const status = document.getElementById("api-status");
   const isBackground = Boolean(options.background);
   try {
+    const session = await fetchJson("/auth/session");
+    state.session = session;
+    document.querySelector('[data-view="admin"]')?.toggleAttribute("hidden", !session.is_admin);
     const [health, tenant, summary, exceptions, quality, matched, expected, receipts, uploads, runs, marketplaceActivity, marketplaceAr, sourceEvidence, inputReadiness, calculationAudit, cashflowProof, apiStatus, sellerStatement, amazonSources] =
       await Promise.all([
         fetchJson("/health"),
@@ -401,9 +405,9 @@ async function loadData(options = {}) {
         fetchJson("/phase0/input-readiness"),
         fetchJson("/phase0/calculation-audit"),
         fetchJson("/phase0/reconciliation/proof").catch(() => null),
-        fetchJson("/phase0/api-status").catch(() => null),   // optional — safe if server not yet restarted
-        fetchJson("/phase0/seller-central/statement").catch(() => null),
-        fetchJson("/admin/integrations/amazon/sources").catch(() => null),
+        session.is_admin ? fetchJson("/phase0/api-status").catch(() => null) : null,
+        session.is_admin ? fetchJson("/phase0/seller-central/statement").catch(() => null) : null,
+        fetchJson(session.is_admin ? "/admin/integrations/amazon/sources" : "/phase0/sources"),
       ]);
 
     state.tenant = tenant;
@@ -431,7 +435,7 @@ async function loadData(options = {}) {
       if (!amazonSources.some((source) => source.id === state.selectedAmazonSourceId)) {
         state.selectedAmazonSourceId = amazonSources[0].id;
       }
-      await loadSelectedAmazonSource();
+      if (session.is_admin) await loadSelectedAmazonSource();
     } else {
       state.selectedAmazonSourceId = "";
       state.amazonSyncs = [];
@@ -474,16 +478,45 @@ async function loadData(options = {}) {
   }
 }
 
-// Resolve API key once from meta tag injected by server (optional)
-const _API_KEY = (() => {
-  const meta = document.querySelector("meta[name='x-api-key']");
-  return meta ? meta.getAttribute("content") : null;
-})();
+let _authenticationStopped = false;
+
+function showAccessMessage(status) {
+  const title = status === 401 ? "Authentication required" : "You do not have permission";
+  let notice = document.getElementById("access-message");
+  if (!notice) {
+    notice = document.createElement("section");
+    notice.id = "access-message";
+    notice.className = "data-confidence-banner";
+    document.querySelector("main")?.prepend(notice);
+  }
+  notice.innerHTML = status === 401
+    ? `<strong>${title}</strong><span>Your session is unavailable.</span><button type="button" class="secondary-button" onclick="location.reload()">Reload</button>`
+    : `<strong>${title}</strong><span>This action requires administrator access.</span>`;
+}
+
+async function apiFetch(url, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = { ...(options.headers || {}) };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers["X-AI-Cashflow-Request"] = "browser";
+  }
+  const response = await fetch(url, { ...options, method, headers, credentials: "same-origin" });
+  if (response.status === 401) {
+    _authenticationStopped = true;
+    stopApiPolling();
+    showAccessMessage(401);
+  } else if (response.status === 403) {
+    showAccessMessage(403);
+    document.querySelector('[data-view="admin"]')?.setAttribute("hidden", "");
+    document.querySelectorAll("#admin button, #admin input, #admin select, #admin textarea")
+      .forEach((control) => { control.disabled = true; });
+  }
+  return response;
+}
 
 async function fetchJson(url, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (_API_KEY) headers["X-API-Key"] = _API_KEY;
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     method: options.method || "GET",
     headers,
     body: options.body ?? undefined,
@@ -494,7 +527,9 @@ async function fetchJson(url, options = {}) {
       const payload = await response.json();
       if (payload.detail) detail = String(payload.detail);
     } catch {}
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
   }
   const text = await response.text();
   try { return JSON.parse(text); } catch { return text; }
@@ -2404,7 +2439,7 @@ async function saveSourceCard(container, idx) {
     const current = await fetchJson("/tenant/settings");
     const list = [...(current.sources?.marketplaces || [])];
     list[idx] = updated_source;
-    const res = await fetch("/tenant/settings", {
+    const res = await apiFetch("/tenant/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...current, sources: { ...current.sources, marketplaces: list } }),
@@ -2435,7 +2470,7 @@ async function deleteSourceCard(container, idx, btn) {
   try {
     const current = await fetchJson("/tenant/settings");
     const list = (current.sources?.marketplaces || []).filter((_, i) => i !== idx);
-    const res = await fetch("/tenant/settings", {
+    const res = await apiFetch("/tenant/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...current, sources: { ...current.sources, marketplaces: list } }),
@@ -2540,9 +2575,9 @@ function _confirmHealthCardRemove(name, group) {
     );
   }
 
-  fetch("/tenant/settings", {
+  apiFetch("/tenant/settings", {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...(_API_KEY ? { "X-API-Key": _API_KEY } : {}) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(tenant),
   })
     .then(async (r) => {
@@ -2627,7 +2662,7 @@ async function deleteUpload(fileName, btn) {
   btn.disabled = true;
   btn.textContent = "Deleting…";
   try {
-    const res = await fetch(`/phase0/uploads/${encodeURIComponent(fileName)}`, { method: "DELETE" });
+    const res = await apiFetch(`/phase0/uploads/${encodeURIComponent(fileName)}`, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       alert(err.detail || "Delete failed");

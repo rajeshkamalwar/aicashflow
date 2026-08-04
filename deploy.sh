@@ -8,6 +8,17 @@ set -e
 APP_DIR="/home/aicashflow.pro/htdocs"
 PYTHON="python3.11"
 SERVICE="aicashflow"
+ENV_FILE="/etc/aicashflow/aicashflow.env"
+ASSERTION_FILE="/etc/nginx/aicashflow/proxy-assertion.conf"
+
+if [ ! -r "$ENV_FILE" ] || [ ! -r "$ASSERTION_FILE" ]; then
+  echo "Protected environment and Nginx assertion files must be provisioned first." >&2
+  exit 1
+fi
+if ! id -u aicashflow >/dev/null 2>&1; then
+  echo "Create the locked aicashflow service account before deployment." >&2
+  exit 1
+fi
 
 echo "==> Setting up Python virtual environment..."
 cd "$APP_DIR"
@@ -26,7 +37,8 @@ if [ ! -f config/tenant.local.json ]; then
 fi
 
 echo "==> Creating data directory..."
-mkdir -p data uploads
+install -d -o aicashflow -g aicashflow data uploads reports
+chown aicashflow:aicashflow config/tenant.local.json
 
 echo "==> Writing systemd service..."
 cat > /etc/systemd/system/${SERVICE}.service <<EOF
@@ -36,10 +48,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=aicashflow
 WorkingDirectory=${APP_DIR}/src
 Environment="PATH=${APP_DIR}/.venv/bin"
-ExecStart=${APP_DIR}/.venv/bin/uvicorn ai_cashflow.api.app:app --host 127.0.0.1 --port 8001
+EnvironmentFile=${ENV_FILE}
+ExecStart=${APP_DIR}/.venv/bin/uvicorn ai_cashflow.api.app:app --host 127.0.0.1 --port 8001 --workers 1 --no-proxy-headers
 Restart=always
 RestartSec=5
 

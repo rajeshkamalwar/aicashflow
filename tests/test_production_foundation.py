@@ -3,15 +3,17 @@ import io
 import tempfile
 import unittest
 
-from fastapi.testclient import TestClient
-
-from ai_cashflow.api.app import create_app
 from ai_cashflow.api.routes import get_phase0_service
 from ai_cashflow.api.services import Phase0Service
 from ai_cashflow.config import AppConfig, TenantConfig
+from security_helpers import create_test_app, machine_headers, test_client as TestClient
 
 
 PHASE0_FIXTURES = Path(__file__).resolve().parent / "fixtures/phase0_samples"
+
+
+def create_app():
+    return create_test_app()
 
 
 def make_service(root: Path, *, api_key: str | None = None) -> Phase0Service:
@@ -39,17 +41,14 @@ class ProductionFoundationTests(unittest.TestCase):
             response = client.get("/ready")
 
             self.assertEqual(response.status_code, 200)
-            body = response.json()
-            self.assertEqual(body["status"], "ready")
-            self.assertEqual(body["storage"], "sqlite")
-            self.assertFalse(body["demo_mode"])
+            self.assertEqual(response.json(), {"status": "ready"})
 
     def test_api_key_protects_mutating_and_report_routes_when_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = make_service(Path(temp_dir), api_key="secret")
             app = create_app()
             app.dependency_overrides[get_phase0_service] = lambda: service
-            client = TestClient(app)
+            client = TestClient(app, authenticated=False)
 
             missing = client.post("/phase0/run-report")
             wrong = client.post(
@@ -74,10 +73,10 @@ class ProductionFoundationTests(unittest.TestCase):
             )
             app = create_app()
             app.dependency_overrides[get_phase0_service] = lambda: service
-            client = TestClient(app)
+            client = TestClient(app, authenticated=False)
 
             response = client.post(
-                "/phase0/run-report", headers={"X-API-Key": "secret"}
+                "/phase0/run-report", headers=machine_headers()
             )
 
             self.assertEqual(response.status_code, 200)

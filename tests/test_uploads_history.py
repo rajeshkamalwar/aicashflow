@@ -2,12 +2,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from fastapi.testclient import TestClient
-
-from ai_cashflow.api.app import create_app
 from ai_cashflow.api.routes import get_phase0_service
 from ai_cashflow.api.services import Phase0Service
 from ai_cashflow.config import AppConfig, TenantConfig
+from security_helpers import create_test_app, test_client as TestClient
+
+
+def create_app():
+    return create_test_app()
 
 
 PHASE0_FIXTURES = Path(__file__).resolve().parent / "fixtures/phase0_samples"

@@ -64,25 +64,68 @@ API endpoints:
 - `GET /phase0/dashboard`
 - `POST /phase0/run-report`
 
-## Production Foundation Settings
+## Production Security Configuration
 
-The local app remains open by default for development. For a protected deployment,
-set an API key before starting Uvicorn:
+Production is fail-closed. Copy `.env.example` to
+`/etc/aicashflow/aicashflow.env`, replace every placeholder, make it readable
+only by root and the `aicashflow` service account, and configure:
 
-```bash
-set AI_CASHFLOW_ENV=production
-set AI_CASHFLOW_API_KEY=<strong-random-value>
-set AI_CASHFLOW_DATABASE_PATH=D:\cashflow\data\operations.sqlite3
-set AI_CASHFLOW_MAX_UPLOAD_BYTES=10485760
-set PYTHONPATH=src
-uvicorn ai_cashflow.api.app:app --host 0.0.0.0 --port 8000
+- `AI_CASHFLOW_ENV=production`
+- `AI_CASHFLOW_DEV_AUTH_BYPASS=false`
+- `AI_CASHFLOW_TRUSTED_PROXIES` with only the immediate Nginx peer addresses
+- `AI_CASHFLOW_PROXY_ASSERTION_SECRET` with at least 32 random bytes
+- `AI_CASHFLOW_ADMIN_USERS` with comma-separated, case-sensitive Basic Auth users
+- `AI_CASHFLOW_API_KEY` with at least 32 random bytes
+- `AI_CASHFLOW_API_KEY_PREVIOUS` only during key rotation
+- `AI_CASHFLOW_MASTER_KEY` with a Fernet key
+- `AI_CASHFLOW_DATABASE_PATH` with an absolute, service-writable path
+- `AI_CASHFLOW_PUBLIC_ORIGIN` with the exact HTTPS browser origin
+- `AI_CASHFLOW_MAX_UPLOAD_BYTES` with a positive byte limit
+
+The assertion secret is also installed in the root-controlled file
+`/etc/nginx/aicashflow/proxy-assertion.conf` (mode `0600`):
+
+```nginx
+proxy_set_header X-AI-Cashflow-Proxy-Assertion "REPLACE_WITH_THE_SAME_SECRET";
 ```
 
-When `AI_CASHFLOW_API_KEY` is set, protected API routes require:
+Never commit either protected file. Nginx overwrites the authenticated username,
+proxy assertion, and legacy `X-Admin-User` headers. Uvicorn listens only on
+`127.0.0.1`, uses one worker, and runs with `--no-proxy-headers`.
 
-```text
-X-API-Key: <strong-random-value>
-```
+Authentication principals and route roles:
+
+- Browser users require Nginx Basic Auth plus the trusted proxy assertion.
+- Browser administrators additionally require an exact username match in
+  `AI_CASHFLOW_ADMIN_USERS`.
+- Machine clients use the active or previous `X-API-Key` only on approved
+  synchronization, ingestion, report-generation, and readiness routes.
+- `/health` is public and returns only `{"status":"ok"}`.
+- Credential management and financial diagnostics remain administrator-only.
+- Normal dashboard source discovery uses the sanitized `/phase0/sources` route.
+
+Browser `POST`, `PUT`, `PATCH`, and `DELETE` requests must carry the exact
+`AI_CASHFLOW_PUBLIC_ORIGIN` Origin and `X-AI-Cashflow-Request: browser`.
+Machine-key requests are exempt from this browser CSRF check.
+
+Development bypass is permitted only with both
+`AI_CASHFLOW_ENV=development` and `AI_CASHFLOW_DEV_AUTH_BYPASS=true`, and only
+for direct loopback requests. It is rejected in test and production.
+
+### Safe Deployment Sequence
+
+1. Back up the current application revision, environment file, Nginx vhost, and database.
+2. Create the locked `aicashflow` service account and grant only the required database/report paths.
+3. Install the protected environment, htpasswd, and assertion include files.
+4. Upload the reviewed commit and run `bash deploy.sh`.
+5. Run `nginx -t`, install `nginx_vhost.conf`, reload Nginx, and verify `/health`.
+6. Verify browser login, `/auth/session`, administrator denial/allow behavior, and one machine readiness request.
+7. Leave `AI_CASHFLOW_API_KEY_PREVIOUS` set only for the planned rotation window.
+
+Rollback by restoring the prior revision and prior protected configuration,
+restarting `aicashflow`, testing `nginx -t`, and reloading Nginx. Restore the
+database backup only if a separate data migration was performed; Phase 1B has
+no schema migration.
 
 Operational history is stored in SQLite:
 

@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 import os
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ai_cashflow.api.schemas import (
@@ -16,6 +16,14 @@ from ai_cashflow.api.schemas import (
 )
 from ai_cashflow.amazon_sp_api import AmazonSpApiClient, AmazonSpApiError
 from ai_cashflow.api.services import Phase0Service
+from ai_cashflow.api.security import (
+    Principal,
+    require_administrator,
+    require_administrator_or_machine,
+    require_machine,
+    require_proxy_user,
+    require_user_or_machine,
+)
 from ai_cashflow.config import AppConfig
 from ai_cashflow.integrations import AmazonIntegrationManager, AmazonSourceRegistry
 
@@ -50,21 +58,8 @@ def get_amazon_source_registry() -> AmazonSourceRegistry:
     return AmazonSourceRegistry(AppConfig().database_path, key)
 
 
-def require_super_admin(
-    x_admin_user: str | None = Header(default=None, alias="X-Admin-User"),
-) -> None:
-    if os.getenv("AI_CASHFLOW_ADMIN_AUTH_REQUIRED", "").lower() in {"1", "true", "yes"}:
-        if not x_admin_user:
-            raise HTTPException(status_code=401, detail="Super admin authentication required.")
-
-
-def require_api_key(
-    x_api_key: str | None = Header(default=None),
-    service: Phase0Service = Depends(get_phase0_service),
-) -> None:
-    expected_key = service.config.api_key
-    if expected_key and x_api_key != expected_key:
-        raise HTTPException(status_code=401, detail="Valid X-API-Key header required.")
+require_super_admin = require_administrator
+require_api_key = require_user_or_machine
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -73,24 +68,35 @@ def health() -> HealthResponse:
 
 
 @router.get("/ready")
-def ready(service: Phase0Service = Depends(get_phase0_service)) -> dict[str, object]:
-    return {
-        "status": "ready",
-        "environment": service.config.environment,
-        "storage": service.config.storage_backend,
-        "database_path": str(service.config.database_path),
-        "demo_mode": False,
-    }
+def ready(_: Principal = Depends(require_administrator_or_machine)) -> dict[str, str]:
+    return {"status": "ready"}
 
 
 @router.get("/", response_class=HTMLResponse)
-def root() -> FileResponse:
+def root(_: Principal = Depends(require_proxy_user)) -> FileResponse:
     return FileResponse(WEB_DIR / "app.html", media_type="text/html")
 
 
 @router.get("/app", response_class=HTMLResponse)
-def app_shell() -> FileResponse:
+def app_shell(_: Principal = Depends(require_proxy_user)) -> FileResponse:
     return FileResponse(WEB_DIR / "app.html", media_type="text/html")
+
+
+@router.get("/auth/session", response_model=dict[str, object])
+def auth_session(principal: Principal = Depends(require_proxy_user)) -> dict[str, object]:
+    return {"username": principal.username, "is_admin": principal.is_admin}
+
+
+@router.get("/phase0/sources", response_model=list[dict[str, object]])
+def phase0_sources(
+    _: Principal = Depends(require_user_or_machine),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> list[dict[str, object]]:
+    allowed = {
+        "id", "name", "marketplace", "marketplaces", "enabled", "status",
+        "sync_frequency_minutes", "last_tested_at", "last_sync_at", "updated_at",
+    }
+    return [{key: value for key, value in source.items() if key in allowed} for source in registry.list_sources()]
 
 
 @router.get("/admin/integrations/amazon", response_model=dict[str, object])
@@ -166,7 +172,7 @@ def test_amazon_source(
 @router.post("/admin/integrations/amazon/sources/{source_id}/sync", response_model=dict[str, object])
 def sync_amazon_source(
     source_id: str,
-    _: None = Depends(require_super_admin),
+    _: Principal = Depends(require_administrator_or_machine),
     registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
@@ -208,7 +214,7 @@ async def import_bank_statement(
     file: UploadFile = File(...),
     bank_source: str = Form(...),
     column_mapping: str | None = Form(default=None),
-    _: None = Depends(require_super_admin),
+    _: Principal = Depends(require_administrator_or_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     if file.content_type not in {
@@ -233,7 +239,7 @@ async def import_bank_statement(
 
 @router.post("/admin/reconciliation/proofs/run", response_model=dict[str, object])
 def run_cashflow_proof(
-    _: None = Depends(require_super_admin),
+    _: Principal = Depends(require_administrator_or_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     try:
@@ -319,7 +325,7 @@ def test_amazon_integration(
 
 @router.post("/admin/integrations/amazon/sync", response_model=dict[str, object])
 def sync_amazon_integration(
-    _: None = Depends(require_super_admin),
+    _: Principal = Depends(require_administrator_or_machine),
     manager: AmazonIntegrationManager = Depends(get_amazon_integration_manager),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
@@ -431,7 +437,7 @@ def phase0_uploads(
 @router.delete("/phase0/uploads/{file_name}", response_model=dict[str, object])
 def phase0_delete_upload(
     file_name: str,
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     try:
@@ -450,7 +456,7 @@ def phase0_runs(
 
 @router.delete("/phase0/runs", response_model=dict[str, object])
 def phase0_clear_runs(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     deleted = service.clear_runs()
@@ -459,7 +465,7 @@ def phase0_clear_runs(
 
 @router.get("/phase0/audit-events", response_model=list[dict[str, str]])
 def phase0_audit_events(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> list[dict[str, str]]:
     return service.list_audit_events()
@@ -476,7 +482,7 @@ def tenant_settings(
 @router.put("/tenant/settings", response_model=dict[str, object])
 def update_tenant_settings(
     payload: dict[str, object],
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     try:
@@ -528,7 +534,7 @@ def phase0_marketplace_ar(
 @router.post("/phase0/api-ingest", response_model=dict[str, object])
 def phase0_api_ingest(
     payload: dict[str, object],
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     """Receive JSON rows from a live marketplace or bank API, persist as CSV,
@@ -563,7 +569,7 @@ def phase0_api_ingest(
 
 @router.get("/phase0/api-status", response_model=dict[str, object])
 def phase0_api_status(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator_or_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     """Return configured API sources, accepted field schemas, and polling metadata."""
@@ -572,7 +578,7 @@ def phase0_api_status(
 
 @router.get("/phase0/amazon/settlement-reports", response_model=list[dict[str, object]])
 def phase0_amazon_settlement_reports(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator_or_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> list[dict[str, object]]:
     try:
@@ -591,7 +597,9 @@ def phase0_amazon_financial_position(
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     try:
-        return service.get_amazon_financial_position(source_id, currency)
+        response = service.get_amazon_financial_position(source_id, currency)
+        response.pop("financial_event_group_diagnostics", None)
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AmazonSpApiError as exc:
@@ -600,7 +608,7 @@ def phase0_amazon_financial_position(
 
 @router.get("/phase0/seller-central/statement", response_model=dict[str, object])
 def phase0_seller_central_statement(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator),
 ) -> dict[str, object]:
     """Return the latest safe Seller Central Statement View scrape, if present."""
     path = SCRAPED_DIR / "statement-view-latest.json"
@@ -658,7 +666,7 @@ def cash_position_report(
 
 @router.post("/phase0/run-report", response_model=RunReportResponse)
 def phase0_run_report(
-    _: None = Depends(require_api_key),
+    _: Principal = Depends(require_administrator_or_machine),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> RunReportResponse:
     result = service.run_report()
