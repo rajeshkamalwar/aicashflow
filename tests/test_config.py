@@ -1,10 +1,23 @@
 from decimal import Decimal
+import os
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from ai_cashflow.config import AppConfig
 
 
 class ConfigTests(unittest.TestCase):
+    def test_marketplace_ar_configuration_paths_can_live_outside_the_release(self):
+        with patch.dict(os.environ, {
+            "AI_CASHFLOW_MARKETPLACE_AR_REGISTRY_PATH": "/var/lib/aicashflow/config/marketplace_ar_sources.csv",
+            "AI_CASHFLOW_MARKETPLACE_AR_FX_PATH": "/var/lib/aicashflow/config/marketplace_ar_fx_rates.csv",
+        }):
+            config = AppConfig()
+
+        self.assertEqual(config.marketplace_ar_registry_path, Path("/var/lib/aicashflow/config/marketplace_ar_sources.csv"))
+        self.assertEqual(config.marketplace_ar_fx_path, Path("/var/lib/aicashflow/config/marketplace_ar_fx_rates.csv"))
+
     def test_default_config_points_to_phase0_paths(self):
         config = AppConfig()
 

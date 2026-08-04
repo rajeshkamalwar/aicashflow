@@ -458,8 +458,12 @@ class AppConfig:
     reports_dir: Path = field(default_factory=lambda: _path_env(
         "AI_CASHFLOW_REPORTS_DIR", ROOT_DIR / "reports" / "phase0"
     ))
-    marketplace_ar_registry_path: Path = CONFIG_DIR / "marketplace_ar_sources.csv"
-    marketplace_ar_fx_path: Path = CONFIG_DIR / "marketplace_ar_fx_rates.csv"
+    marketplace_ar_registry_path: Path = field(default_factory=lambda: _path_env(
+        "AI_CASHFLOW_MARKETPLACE_AR_REGISTRY_PATH", CONFIG_DIR / "marketplace_ar_sources.csv"
+    ))
+    marketplace_ar_fx_path: Path = field(default_factory=lambda: _path_env(
+        "AI_CASHFLOW_MARKETPLACE_AR_FX_PATH", CONFIG_DIR / "marketplace_ar_fx_rates.csv"
+    ))
     marketplace_ar_ingest_mode: str = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_MARKETPLACE_AR_INGEST_MODE", "hybrid"
     ).strip().lower())
