@@ -825,10 +825,6 @@ class Phase0Service:
                     f"No approved currency mapping exists for Amazon country {country_code or 'unknown'}."
                 )
             usd_rate = rates.get(source_currency)
-            if usd_rate is None or usd_rate <= 0:
-                raise ValueError(
-                    f"No positive USD exchange rate is configured for {source_currency}."
-                )
             result = client.get_financial_position(
                 str(marketplace["id"]),
                 usd_rate,
@@ -879,24 +875,35 @@ class Phase0Service:
             if result.get("mode") == "amazon_open_balances"
             else result.get("amounts", {}).get("standard_balance")
         )
-        fx_warning = (
-            f"FX rates are {fx_age_days} days old; configured limit is {fx_max_age_days} days."
-            if fx_status == "stale"
-            else None
-        )
+        missing_fx_currencies = sorted(result.get("missing_fx_currencies", []))
+        if estimated_usd is None:
+            fx_status = "unavailable"
+            missing = missing_fx_currencies or currencies_included
+            fx_warning = (
+                f"No approved USD exchange rate is available for {', '.join(missing)}."
+            )
+        else:
+            fx_warning = (
+                f"FX rates are {fx_age_days} days old; configured limit is {fx_max_age_days} days."
+                if fx_status == "stale"
+                else None
+            )
         result["fx_conversion"] = {
             "amount": estimated_usd,
             "base_currency": "USD",
             "fx_source": self.config.tenant.reconciliation.usd_exchange_rates_source,
             "fx_rate_as_of": fx_as_of,
+            "fx_retrieved_at": (
+                self.config.tenant.reconciliation.usd_exchange_rates_retrieved_at
+            ),
             "fx_rate_max_age_days": fx_max_age_days,
             "fx_age_days": fx_age_days,
             "currencies_included": currencies_included,
             "status": fx_status,
             "availability_reason": fx_warning,
             "disclaimer": (
-                "Converted value is an estimate for reporting purposes. "
-                "Native-currency balances remain authoritative."
+                "Converted values are estimates for reporting purposes. "
+                "Native-currency Amazon amounts remain authoritative."
             ),
         }
         result.setdefault("financial_values", []).append({

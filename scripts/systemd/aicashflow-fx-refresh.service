@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh AI Cashflow approved FX rates
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0027
+EnvironmentFile=/etc/aicashflow/aicashflow.env
+WorkingDirectory=/opt/aicashflow/current/src
+ExecStart=/usr/sbin/runuser --user aicashflow -- /opt/aicashflow/current/.venv/bin/python -m ai_cashflow.fx_rates --tenant-config ${AI_CASHFLOW_TENANT_CONFIG_PATH} --marketplace-fx ${AI_CASHFLOW_MARKETPLACE_AR_FX_PATH} --database ${AI_CASHFLOW_DATABASE_PATH} --backup-dir /var/lib/aicashflow/fx/backups --status-file /var/lib/aicashflow/fx/last-refresh.json --max-age-days 7
+ExecStartPost=/usr/bin/systemctl try-restart aicashflow.service

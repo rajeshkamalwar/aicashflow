@@ -1142,9 +1142,9 @@ function renderTreasuryOverview() {
     fxEl.innerHTML = `
       <span>Estimated USD Equivalent</span>
       <strong>${fx.amount === null || fx.amount === undefined ? "Unavailable" : `USD ${escapeHtml(formatMoney(moneyNumber(fx.amount)))}`}</strong>
-      <small>FX source: ${escapeHtml(fx.fx_source || "Unavailable")} · Rate date: ${escapeHtml(fx.fx_rate_as_of || "Unavailable")} · Currencies: ${escapeHtml((Array.isArray(fx.currencies_included) ? fx.currencies_included : []).join(", ") || "Unavailable")} · Status: ${escapeHtml(fx.status || "unknown")}</small>
+      <small>FX source: ${escapeHtml(fx.fx_source || "Unavailable")} · Rate date: ${escapeHtml(fx.fx_rate_as_of || "Unavailable")} · Retrieved: ${escapeHtml(fx.fx_retrieved_at || "Unavailable")} · Currencies: ${escapeHtml((Array.isArray(fx.currencies_included) ? fx.currencies_included : []).join(", ") || "Unavailable")} · Status: ${escapeHtml(fx.status || "unknown")}</small>
       ${fx.availability_reason ? `<em>${escapeHtml(fx.availability_reason)}</em>` : ""}
-      <small>${escapeHtml(fx.disclaimer || "Converted value is an estimate for reporting purposes. Native-currency balances remain authoritative.")}</small>`;
+      <small>${escapeHtml(fx.disclaimer || "Converted values are estimates for reporting purposes. Native-currency Amazon amounts remain authoritative.")}</small>`;
 
     renderAvailability(position, "CURRENT_RESERVE", "overview-reserve-cash", "overview-reserve-note", "Amazon SP-API has not provided an authoritative current reserve value.");
     renderAvailability(position, "RESERVE_ADJUSTED_FUNDS", "overview-funds-cash", "overview-funds-note", "Funds available cannot be calculated without an authoritative current reserve.");

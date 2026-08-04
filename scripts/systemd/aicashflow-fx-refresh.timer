@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh AI Cashflow FX rates daily
+
+[Timer]
+OnCalendar=*-*-* 17:15:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+AccuracySec=1m
+Unit=aicashflow-fx-refresh.service
+
+[Install]
+WantedBy=timers.target

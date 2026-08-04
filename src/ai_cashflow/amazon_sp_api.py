@@ -418,17 +418,20 @@ class AmazonSpApiClient:
             group_id = str(group.get("FinancialEventGroupId", "")).strip()
             amount, currency = self._money(group.get("OriginalTotal"), "open financial event group total")
             rate = usd_rates.get(currency)
-            if rate is None or rate <= 0:
-                raise AmazonSpApiError(f"No positive USD exchange rate is configured for {currency}.")
-            usd_amount = (amount * rate).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+            rate = rate if rate is not None and rate > 0 else None
+            usd_amount = (
+                (amount * rate).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+                if rate is not None else None
+            )
             totals[currency] = totals.get(currency, Decimal("0")) + amount
-            total_usd += usd_amount
+            if usd_amount is not None:
+                total_usd += usd_amount
             balances.append({
                 "financial_event_group_id": group_id,
                 "currency": currency,
                 "amount": self._format_money(amount),
-                "usd_rate": str(rate),
-                "usd_amount": self._format_money(usd_amount),
+                "usd_rate": str(rate) if rate is not None else None,
+                "usd_amount": self._format_money(usd_amount) if usd_amount is not None else None,
                 "started_at": group.get("FinancialEventGroupStart"),
                 "processing_status": "Open",
             })
@@ -481,6 +484,9 @@ class AmazonSpApiClient:
                     availability_reason=unavailable_reason,
                 ))
         recent_completed_payouts = self._completed_payouts(canonical, now)
+        missing_fx_currencies = sorted({
+            row["currency"] for row in balances if row["usd_rate"] is None
+        })
         return {
             "status": "ready" if balances else "unavailable",
             "mode": "amazon_open_balances",
@@ -494,8 +500,12 @@ class AmazonSpApiClient:
                 for currency, amount in sorted(totals.items())
             },
             "amounts": {
-                "current_balance": self._format_money(total_usd) if balances else None
+                "current_balance": (
+                    self._format_money(total_usd)
+                    if balances and not missing_fx_currencies else None
+                )
             },
+            "missing_fx_currencies": missing_fx_currencies,
             "expected_payout_forecasts": [],
             "recent_completed_payouts": recent_completed_payouts,
             "financial_values": financial_values,
@@ -546,7 +556,7 @@ class AmazonSpApiClient:
     def get_financial_position(
         self,
         marketplace_id: str,
-        usd_rate: Decimal,
+        usd_rate: Decimal | None,
         *,
         expected_currency: str | None = None,
         now: datetime | None = None,
@@ -554,7 +564,7 @@ class AmazonSpApiClient:
         """Return the current Seller Central statement position, normalized to USD."""
         if not marketplace_id:
             raise ValueError("An Amazon marketplace ID is required.")
-        if usd_rate <= 0:
+        if usd_rate is not None and usd_rate <= 0:
             raise ValueError("The USD exchange rate must be positive.")
         current_time = now or datetime.now(timezone.utc)
         if current_time.tzinfo is None:
@@ -572,7 +582,7 @@ class AmazonSpApiClient:
         self,
         http: httpx.Client,
         marketplace_id: str,
-        usd_rate: Decimal,
+        usd_rate: Decimal | None,
         now: datetime,
         expected_currency: str | None,
     ) -> dict[str, object]:
@@ -721,7 +731,7 @@ class AmazonSpApiClient:
             "status": "ready",
             "currency": "USD",
             "source_currency": source_currency,
-            "usd_rate": str(usd_rate),
+            "usd_rate": str(usd_rate) if usd_rate is not None else None,
             "as_of": retrieved_at,
             "settlement_period_start": period_start,
             "recent_payout_date": recent_payout_date,
@@ -739,7 +749,11 @@ class AmazonSpApiClient:
                 for name, value in source_amounts.items()
             },
             "amounts": {
-                name: self._format_money(value * usd_rate) if value is not None else None
+                name: (
+                    self._format_money(value * usd_rate)
+                    if value is not None and usd_rate is not None
+                    else None
+                )
                 for name, value in source_amounts.items()
             },
             "expected_payout_forecast": {

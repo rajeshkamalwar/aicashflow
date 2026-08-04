@@ -34,6 +34,7 @@ class ReconciliationConfig:
     usd_exchange_rates_as_of: str = "2026-07-16"
     usd_exchange_rates_source: str = "Configured tenant FX table"
     usd_exchange_rates_max_age_days: int = 7
+    usd_exchange_rates_retrieved_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ class TenantConfig:
     def from_dict(cls, payload: dict[str, object]) -> "TenantConfig":
         brand_payload = _dict(payload.get("brand"))
         reconciliation_payload = _dict(payload.get("reconciliation"))
+        fx_metadata = _dict(reconciliation_payload.get("usd_exchange_rate_metadata"))
         sources_payload = _dict(payload.get("sources"))
         client_setup_payload = _dict(payload.get("client_setup"))
         default_client_setup = cls.default().client_setup
@@ -258,6 +260,9 @@ class TenantConfig:
                         "usd_exchange_rates_max_age_days",
                         ReconciliationConfig.usd_exchange_rates_max_age_days,
                     )),
+                ),
+                usd_exchange_rates_retrieved_at=str(
+                    fx_metadata.get("retrieved_at", "")
                 ),
             ),
             sources=SourcesConfig(
@@ -412,6 +417,10 @@ class TenantConfig:
                 "usd_exchange_rates_max_age_days": (
                     self.reconciliation.usd_exchange_rates_max_age_days
                 ),
+                "usd_exchange_rate_metadata": {
+                    "base_currency": "USD",
+                    "retrieved_at": self.reconciliation.usd_exchange_rates_retrieved_at,
+                },
             },
             "sources": {
                 "marketplaces": [

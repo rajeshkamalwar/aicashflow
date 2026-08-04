@@ -509,6 +509,50 @@ class AmazonSpApiClientTests(unittest.TestCase):
             Decimal(position["amounts"]["current_balance"]),
         )
 
+    def test_missing_fx_rate_keeps_native_balances_and_marks_estimate_unavailable(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "access-token"})
+            return httpx.Response(200, json={"payload": {"FinancialEventGroupList": [
+                self._group("CAD-OPEN", "Open", "10.25", currency="CAD"),
+                self._group("MXN-OPEN", "Open", "20.50", currency="MXN"),
+            ]}})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            position = AmazonSpApiClient(
+                AmazonSpApiConfig("client", "secret", "refresh"), http=http
+            ).get_current_balances(
+                {"CAD": Decimal("0.75")},
+                now=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(position["totals_by_currency"], {"CAD": "10.25", "MXN": "20.50"})
+        self.assertIsNone(position["amounts"]["current_balance"])
+        self.assertEqual(position["missing_fx_currencies"], ["MXN"])
+        self.assertIsNone(next(row for row in position["balances"] if row["currency"] == "MXN")["usd_amount"])
+
+    def test_missing_selected_currency_rate_keeps_native_balance(self):
+        client, http = self._client_for_financial_groups([
+            self._group(
+                "MXN-OPEN",
+                "Open",
+                "128.22",
+                currency="MXN",
+                FinancialEventGroupStart="2026-08-01T00:00:00Z",
+            )
+        ])
+        with http:
+            position = client.get_financial_position(
+                "A1AM78C64UM0Y8",
+                None,
+                expected_currency="MXN",
+                now=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(position["source_amounts"]["standard_balance"], "128.22")
+        self.assertIsNone(position["amounts"]["standard_balance"])
+        self.assertIsNone(position["usd_rate"])
+
     def test_completed_payouts_require_successful_positive_closed_transfers(self):
         groups = [
             self._group("CAD-OPEN", "Open", "10.00", currency="CAD"),
