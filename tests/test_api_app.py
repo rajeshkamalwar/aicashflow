@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -273,6 +273,41 @@ class ApiAppTests(unittest.TestCase):
         self.assertTrue(loaded.json()["credentials"]["refresh_token_configured"])
         self.assertNotIn("secret-client", loaded.text)
         self.assertNotIn("secret-refresh", loaded.text)
+
+    def test_transaction_backfill_and_diagnostics_are_admin_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app()
+            registry = AmazonSourceRegistry(
+                Path(temp_dir) / "ops.db", Fernet.generate_key().decode()
+            )
+            source = registry.upsert({
+                "name": "Canada", "client_id": "a", "client_secret": "b", "refresh_token": "c",
+            })
+            app.dependency_overrides[get_amazon_source_registry] = lambda: registry
+            denied = TestClient(app, authenticated=False).get(
+                f"/admin/integrations/amazon/sources/{source['id']}/transaction-collection"
+            )
+            client = TestClient(app)
+            created = client.post(
+                f"/admin/integrations/amazon/sources/{source['id']}/transaction-backfills",
+                json={
+                    "marketplace_id": "CA",
+                    "marketplace_name": "Amazon.ca",
+                    "currency": "CAD",
+                    "transaction_status": "DEFERRED",
+                    "overall_start": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+                    "overall_end": datetime(2026, 8, 2, tzinfo=timezone.utc).isoformat(),
+                    "slice_hours": 24,
+                },
+            )
+            diagnostics = client.get(
+                f"/admin/integrations/amazon/sources/{source['id']}/transaction-collection"
+            )
+
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(diagnostics.status_code, 200)
+        self.assertEqual(diagnostics.json()["backfills"][0]["status"], "running")
 
     def test_amazon_admin_settings_require_proxy_authenticated_admin_in_production(self):
         with tempfile.TemporaryDirectory() as temp_dir:

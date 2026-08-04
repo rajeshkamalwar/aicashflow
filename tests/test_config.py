@@ -14,6 +14,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertFalse(config.transaction_collection_enabled)
         self.assertFalse(config.transaction_visibility_enabled)
+        self.assertEqual(config.transaction_retention_days, 0)
 
     def test_transaction_collection_can_be_enabled_without_visibility(self):
         with patch.dict(os.environ, {

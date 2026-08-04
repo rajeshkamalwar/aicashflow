@@ -484,6 +484,24 @@ class AppConfig:
     transaction_visibility_enabled: bool = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED", "false"
     ).strip().lower() in {"1", "true", "yes", "on"})
+    transaction_incremental_lookback_hours: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_LOOKBACK_HOURS", 24
+    ))
+    transaction_overlap_hours: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_OVERLAP_HOURS", 6
+    ))
+    transaction_safety_delay_minutes: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_SAFETY_DELAY_MINUTES", 2
+    ))
+    transaction_max_pages_per_sync: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_MAX_PAGES_PER_SYNC", 5
+    ))
+    transaction_max_seconds_per_sync: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_MAX_SECONDS_PER_SYNC", 20
+    ))
+    transaction_retention_days: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_RETENTION_DAYS", 0
+    ))
     max_upload_bytes: int = field(default_factory=lambda: _int_env(
         "AI_CASHFLOW_MAX_UPLOAD_BYTES",
         10 * 1024 * 1024,
@@ -506,6 +524,14 @@ class AppConfig:
                 "AI_CASHFLOW_DATABASE_PATH",
                 self.reports_dir / "operations.sqlite3",
             )
+        if not 1 <= self.transaction_overlap_hours <= self.transaction_incremental_lookback_hours <= 24 * 30:
+            raise ValueError("Transaction overlap/lookback hours are invalid")
+        if self.transaction_safety_delay_minutes < 2:
+            raise ValueError("Transaction safety delay must be at least two minutes")
+        if self.transaction_max_pages_per_sync < 1 or self.transaction_max_seconds_per_sync < 1:
+            raise ValueError("Transaction scheduler limits must be positive")
+        if self.transaction_retention_days < 0:
+            raise ValueError("Transaction retention days cannot be negative")
 
     @property
     def supported_currencies(self) -> set[str]:

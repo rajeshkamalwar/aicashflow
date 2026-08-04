@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from ai_cashflow.api.schemas import (
     AmazonIntegrationUpdate,
     AmazonSourceUpdate,
+    AmazonTransactionBackfillCreate,
     HealthResponse,
     Phase0SummaryResponse,
     RunReportResponse,
@@ -287,6 +288,80 @@ def list_amazon_source_syncs(
         return registry.list_syncs(source_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/admin/integrations/amazon/sources/{source_id}/transaction-collection",
+    response_model=dict[str, object],
+)
+def amazon_transaction_collection_diagnostics(
+    source_id: str,
+    _: None = Depends(require_super_admin),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    try:
+        return registry.transaction_collection_diagnostics(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/admin/integrations/amazon/sources/{source_id}/transaction-backfills",
+    response_model=dict[str, object],
+)
+def create_amazon_transaction_backfill(
+    source_id: str,
+    payload: AmazonTransactionBackfillCreate,
+    _: None = Depends(require_super_admin),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    try:
+        return registry.create_transaction_backfill(
+            source_id=source_id,
+            **payload.model_dump(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/admin/integrations/amazon/sources/{source_id}/transaction-backfills",
+    response_model=list[dict[str, object]],
+)
+def list_amazon_transaction_backfills(
+    source_id: str,
+    _: None = Depends(require_super_admin),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> list[dict[str, object]]:
+    return registry.list_transaction_backfills(source_id)
+
+
+@router.post(
+    "/admin/integrations/amazon/transaction-backfills/{job_id}/{action}",
+    response_model=dict[str, object],
+)
+def control_amazon_transaction_backfill(
+    job_id: str,
+    action: str,
+    _: None = Depends(require_super_admin),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    try:
+        if action == "pause":
+            return registry.pause_transaction_backfill(job_id)
+        if action == "resume":
+            return registry.resume_transaction_backfill(job_id)
+        if action == "run":
+            job = registry.get_transaction_backfill(job_id)
+            return registry.run_transaction_backfill(
+                job_id,
+                AmazonSpApiClient(registry.credentials(job["source_id"])),
+            )
+        raise ValueError("Backfill action must be pause, resume, or run.")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AmazonSpApiError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.delete("/admin/integrations/amazon/sources/{source_id}/credentials", response_model=dict[str, object])

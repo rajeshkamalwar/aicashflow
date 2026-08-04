@@ -186,7 +186,7 @@ class AmazonSourceRegistryTests(unittest.TestCase):
             result = registry.transaction_visibility(source["id"], "CAD")
 
             self.assertEqual(result["deferred_count"], 0)
-            self.assertEqual(result["deferred_released_count"], 1)
+            self.assertEqual(result["deferred_released_count"], 0)
             self.assertEqual(result["conflict_count"], 1)
 
     def test_successful_empty_status_snapshot_removes_stale_current_state(self):

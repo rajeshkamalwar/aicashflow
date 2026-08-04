@@ -1,5 +1,6 @@
 import unittest
-from datetime import datetime, timezone
+from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -8,6 +9,85 @@ from ai_cashflow.amazon_sp_api import AmazonSpApiClient, AmazonSpApiConfig
 
 
 class AmazonSpApiClientTests(unittest.TestCase):
+    def test_transaction_page_uses_immutable_before_and_reports_rate_limit(self):
+        requests = []
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(
+                200,
+                headers={"x-amzn-RateLimit-Limit": "0.5"},
+                json={"payload": {"transactions": [{"transactionId": "T1"}], "nextToken": "next"}},
+            )
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            page = AmazonSpApiClient(
+                AmazonSpApiConfig("client", "secret", "refresh"), http=http
+            ).list_transactions_page("CA", "DEFERRED", start, end)
+
+        self.assertEqual(requests[1].url.params["postedAfter"], "2026-08-01T00:00:00Z")
+        self.assertEqual(requests[1].url.params["postedBefore"], "2026-08-02T00:00:00Z")
+        self.assertEqual(page["next_token"], "next")
+        self.assertEqual(page["rate_limit"], "0.5")
+
+    def test_transaction_page_rejects_invalid_or_unsupported_windows(self):
+        client = AmazonSpApiClient(AmazonSpApiConfig("client", "secret", "refresh"))
+        start = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            client.list_transactions_page("CA", "DEFERRED", start, start)
+        with self.assertRaisesRegex(ValueError, "180"):
+            client.list_transactions_page(
+                "CA", "DEFERRED", start - timedelta(days=181), start
+            )
+
+    def test_transaction_page_retries_retryable_failures_with_retry_after(self):
+        attempts = 0
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "token"})
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={"Retry-After": "0.001"})
+            return httpx.Response(200, json={"payload": {"transactions": []}})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            AmazonSpApiClient(
+                AmazonSpApiConfig("client", "secret", "refresh"), http=http
+            ).list_transactions_page(
+                "CA", "RELEASED",
+                datetime(2026, 8, 1, tzinfo=timezone.utc),
+                datetime(2026, 8, 2, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(attempts, 2)
+
+    def test_transaction_pages_follow_the_returned_request_rate(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(
+                200,
+                headers={"x-amzn-RateLimit-Limit": "0.5"},
+                json={"payload": {"transactions": []}},
+            )
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = AmazonSpApiClient(
+                AmazonSpApiConfig("client", "secret", "refresh"), http=http
+            )
+            with patch("ai_cashflow.amazon_sp_api.monotonic", return_value=0), patch(
+                "ai_cashflow.amazon_sp_api.sleep"
+            ) as delay:
+                for _ in range(2):
+                    client.list_transactions_page(
+                        "CA", "RELEASED",
+                        datetime(2026, 8, 1, tzinfo=timezone.utc),
+                        datetime(2026, 8, 2, tzinfo=timezone.utc),
+                    )
+
+        delay.assert_called_once_with(2.0)
+
     def test_lists_transaction_status_for_persisted_sync(self):
         requests = []
         def handler(request: httpx.Request) -> httpx.Response:

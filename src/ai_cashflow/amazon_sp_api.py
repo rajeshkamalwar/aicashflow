@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import gzip
 import json
-from time import sleep
+from random import uniform
+from time import monotonic, sleep
 from urllib.parse import urlparse
 
 import httpx
@@ -49,6 +50,7 @@ class AmazonSpApiClient:
     def __init__(self, config: AmazonSpApiConfig, *, http: httpx.Client | None = None) -> None:
         self.config = config
         self.http = http
+        self._transaction_next_request_at = 0.0
 
     def list_settlement_reports(self) -> list[dict[str, object]]:
         if self.http is None:
@@ -98,6 +100,89 @@ class AmazonSpApiClient:
             self.http, token, marketplace_id=marketplace_id,
             posted_after=posted_after, transaction_status=transaction_status,
         )
+
+    def list_transactions_page(
+        self,
+        marketplace_id: str,
+        transaction_status: str,
+        posted_after: datetime,
+        posted_before: datetime,
+        next_token: str | None = None,
+    ) -> dict[str, object]:
+        """Return one resumable page for an immutable Amazon date window."""
+        if transaction_status not in {"DEFERRED", "DEFERRED_RELEASED", "RELEASED"}:
+            raise ValueError(f"Unsupported Amazon transaction status: {transaction_status}.")
+        start = posted_after.replace(tzinfo=timezone.utc) if posted_after.tzinfo is None else posted_after.astimezone(timezone.utc)
+        end = posted_before.replace(tzinfo=timezone.utc) if posted_before.tzinfo is None else posted_before.astimezone(timezone.utc)
+        if start >= end or end - start > timedelta(days=180):
+            raise ValueError("Amazon transaction windows must be positive and no longer than 180 days.")
+        if end > datetime.now(timezone.utc) - timedelta(minutes=2):
+            raise ValueError("Amazon postedBefore must be at least two minutes in the past.")
+        if self.http is None:
+            with httpx.Client(timeout=30.0) as http:
+                return self._list_transactions_page(
+                    http, self._access_token(http), marketplace_id, transaction_status,
+                    start, end, next_token,
+                )
+        return self._list_transactions_page(
+            self.http, self._access_token(self.http), marketplace_id, transaction_status,
+            start, end, next_token,
+        )
+
+    def _list_transactions_page(
+        self,
+        http: httpx.Client,
+        token: str,
+        marketplace_id: str,
+        transaction_status: str,
+        posted_after: datetime,
+        posted_before: datetime,
+        next_token: str | None,
+    ) -> dict[str, object]:
+        params = {
+            "postedAfter": posted_after.isoformat().replace("+00:00", "Z"),
+            "postedBefore": posted_before.isoformat().replace("+00:00", "Z"),
+            "marketplaceId": marketplace_id,
+            "transactionStatus": transaction_status,
+            "pageSize": 500,
+        }
+        if next_token:
+            params["nextToken"] = next_token
+        response = None
+        wait_seconds = self._transaction_next_request_at - monotonic()
+        if wait_seconds > 0:
+            sleep(wait_seconds)
+        for attempt in range(4):
+            response = http.get(
+                f"{self.config.endpoint}/finances/2024-06-19/transactions",
+                headers={"x-amz-access-token": token},
+                params=params,
+            )
+            if response.status_code not in {429, 500, 502, 503, 504}:
+                break
+            if attempt == 3:
+                break
+            try:
+                retry_after = max(0.0, min(float(response.headers.get("Retry-After", "0")), 30.0))
+            except ValueError:
+                retry_after = 0.0
+            sleep(retry_after or min(0.25 * (2 ** attempt) + uniform(0, 0.1), 2.0))
+        assert response is not None
+        self._raise_for_status(response, "list finance transactions")
+        payload = response.json().get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("transactions", []), list):
+            raise AmazonSpApiError("Amazon returned an invalid finance transaction response.")
+        try:
+            rate_limit = float(response.headers.get("x-amzn-RateLimit-Limit", "0"))
+        except ValueError:
+            rate_limit = 0.0
+        if rate_limit > 0:
+            self._transaction_next_request_at = monotonic() + (1.0 / rate_limit)
+        return {
+            "transactions": [row for row in payload.get("transactions", []) if isinstance(row, dict)],
+            "next_token": payload.get("nextToken") if isinstance(payload.get("nextToken"), str) else None,
+            "rate_limit": response.headers.get("x-amzn-RateLimit-Limit"),
+        }
 
     def get_current_balances(
         self,

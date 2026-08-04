@@ -1,5 +1,8 @@
 """API response schemas."""
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -56,3 +59,13 @@ class AmazonIntegrationUpdate(BaseModel):
 
 class AmazonSourceUpdate(AmazonIntegrationUpdate):
     name: str = Field(min_length=1, max_length=120)
+
+
+class AmazonTransactionBackfillCreate(BaseModel):
+    marketplace_id: str = Field(min_length=1, max_length=40)
+    marketplace_name: str = Field(min_length=1, max_length=120)
+    currency: str = Field(min_length=3, max_length=3)
+    transaction_status: Literal["DEFERRED", "RELEASED", "DEFERRED_RELEASED"]
+    overall_start: datetime
+    overall_end: datetime
+    slice_hours: int = Field(default=24, ge=1, le=720)
