@@ -1,0 +1,4 @@
+payout_id,entity,marketplace,currency,expected_date,amount,reference
+POC-API1-001,Ergode Inc.,Ergode Inc. marketplace - API source 1,USD,2026-05-20,12500.00,SETTLEMENT-API1-001
+POC-API1-002,Ergode Inc.,Ergode Inc. marketplace - API source 1,USD,2026-05-21,8900.50,SETTLEMENT-API1-002
+POC-API1-003,Ergode Inc.,Ergode Inc. marketplace - API source 1,USD,2026-05-22,4300.00,SETTLEMENT-API1-003

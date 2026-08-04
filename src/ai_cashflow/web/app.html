@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cashflow Command Center</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23087f7a'/><text x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' font-family='system-ui,sans-serif' font-weight='800' font-size='14' fill='white'>CC</text></svg>">
+  <link rel="stylesheet" href="/assets/app.css?v=20260804-financial-meaning-review">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div id="brand-mark" class="brand-mark">CC</div>
+        <div>
+          <strong id="product-name">Cashflow Command Center</strong>
+          <span id="tenant-name">Tenant Workspace</span>
+        </div>
+        <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-expanded="false" aria-controls="sidebar-menu" aria-label="Open navigation">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+      <div id="sidebar-menu" class="sidebar-menu">
+        <div class="sidebar-section">
+          <span>WORKSPACE</span>
+        </div>
+        <nav aria-label="Main navigation">
+        <button class="nav-item active" data-view="overview">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity=".85"/><rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity=".85"/><rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity=".85"/><rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity=".85"/></svg>
+          Overview
+        </button>
+        <button class="nav-item" data-view="marketplace-ar">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none"><path d="M3 16h14M5 13V8m5 5V4m5 9v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          Marketplace AR
+        </button>
+        <button class="nav-item" data-view="payouts">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none"><path d="M4 5h12M4 10h8M4 15h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="15.5" cy="13.5" r="3" stroke="currentColor" stroke-width="1.4"/><path d="M17.5 15.5l1.5 1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          Payouts
+        </button>
+        <button class="nav-item" data-view="sources">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5c0 0-3.5 3-3.5 7.5s3.5 7.5 3.5 7.5M10 2.5c0 0 3.5 3 3.5 7.5S10 17.5 10 17.5M2.5 10h15" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          Sources
+        </button>
+        <div class="nav-divider" aria-hidden="true"></div>
+        <button class="nav-item admin-nav" data-view="admin">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Admin Settings
+        </button>
+        </nav>
+        <button id="run-report" class="run-button">Recalculate View</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <p id="scope-label" class="eyebrow">Group treasury scope</p>
+          <h1 id="view-title">Overview</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="live-badge" class="live-badge"></span>
+          <div id="api-status" class="status">Checking system</div>
+        </div>
+      </header>
+
+      <section id="global-scope-bar" class="scope-bar" aria-label="Financial data filters">
+        <label>Source<select id="global-source-filter"><option value="">All sources</option></select></label>
+        <label>Currency<select id="global-currency-filter"><option value="">All currencies</option></select></label>
+        <label>Period<select id="global-period-filter"><option value="all">All loaded data</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option></select></label>
+        <div class="scope-freshness" role="status">
+          <span>Data freshness</span>
+          <strong id="scope-freshness-status">Checking source timestamps</strong>
+          <small id="scope-freshness-detail">No source timestamp loaded yet</small>
+        </div>
+        <button id="sync-selected-source" class="secondary-button" type="button" hidden>Sync selected source</button>
+      </section>
+
+      <section id="overview" class="view active">
+        <section id="overview-readiness" class="data-confidence-banner" role="status"></section>
+
+        <section class="overview-financial-grid" aria-label="Amazon financial position">
+          <article class="command-kpi emphasis open-balance-card">
+            <span id="overview-confirmed-label">Amazon-Reported Open Balances</span>
+            <strong id="overview-confirmed-cash" class="open-balance-list" role="list">Unavailable</strong>
+            <small id="overview-confirmed-note">Select an Amazon source to load its open balances.</small>
+            <div id="overview-open-balance-meta" class="open-balance-meta"></div>
+            <div id="overview-fx-estimate" class="fx-estimate"></div>
+          </article>
+          <article class="command-kpi availability-card">
+            <span id="overview-reserve-label">Current reserve</span>
+            <strong id="overview-reserve-cash">Unavailable</strong>
+            <small id="overview-reserve-note">Amazon SP-API has not provided an authoritative current reserve value.</small>
+          </article>
+          <article class="command-kpi availability-card">
+            <span id="overview-funds-label">Funds available after reserve</span>
+            <strong id="overview-funds-cash">Unavailable</strong>
+            <small id="overview-funds-note">Funds available cannot be calculated reliably.</small>
+          </article>
+          <article class="command-kpi availability-card">
+            <span id="overview-upcoming-label">Upcoming payout</span>
+            <strong id="overview-upcoming-cash">Unavailable</strong>
+            <small id="overview-upcoming-note">Amazon SP-API has not supplied an authoritative upcoming payout amount and transfer date.</small>
+          </article>
+        </section>
+
+        <section class="panel api-validation-panel" aria-labelledby="api-validation-heading">
+          <div class="panel-title"><div><h2 id="api-validation-heading">API Data Validation</h2><span>Technical processing status is separate from Seller Central reconciliation.</span></div></div>
+          <div id="overview-source-status" class="source-status-grid"></div>
+        </section>
+
+        <section class="overview-workbench">
+          <section class="panel source-coverage-panel">
+            <div class="panel-title"><div><h2>Source coverage</h2><span>Each account remains separate; currencies are never blended.</span></div></div>
+            <div id="source-overview-list" class="source-overview-list"></div>
+          </section>
+          <section class="panel exception-snapshot-panel">
+            <div class="panel-title"><div><h2>Attention required</h2><span>Operational issues in the selected scope.</span></div><button id="review-actions-btn" class="secondary-button" type="button">Open payouts</button></div>
+            <div id="overview-exception-snapshot" class="exception-snapshot"></div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><div><h2>Recent settlement activity</h2><span>Latest source-backed transactions after the active filters.</span></div><strong id="overview-activity-count" class="panel-count">0 rows</strong></div>
+          <div id="overview-activity-list" class="activity-table"></div>
+        </section>
+
+        <section class="section-heading-row">
+          <div><span class="strip-label">Reports & Audit</span><h2>Outputs and refresh history</h2></div>
+          <div class="inline-stats"><span>Refreshes <strong id="runs-count">-</strong></span><span>Reports <strong id="reports-output-count">-</strong></span></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Reports</h2><span>Generated from current reconciliation data</span></div>
+          <div id="report-links"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Refresh History</h2>
+            <span>Traceable execution log</span>
+            <button id="clear-runs-btn" type="button" class="secondary-button danger-btn" style="margin-left:auto">Clear history</button>
+          </div>
+          <div id="run-history-list"></div>
+        </section>
+
+      </section>
+
+      <section id="marketplace-ar" class="view">
+        <section class="section-hero">
+          <div>
+            <span class="strip-label">Marketplace AR</span>
+            <h2>Outstanding marketplace receivables, normalized to USD.</h2>
+            <p>Local values remain traceable while every reported total uses the snapshot FX rate.</p>
+          </div>
+          <div class="section-stat"><span>Snapshot</span><strong id="marketplace-ar-date">—</strong></div>
+          <div class="section-stat"><span>FX rate date</span><strong id="marketplace-ar-rate-date">—</strong></div>
+        </section>
+        <section id="marketplace-ar-coverage" class="data-confidence-banner" role="status"></section>
+        <section class="command-kpi-grid" aria-label="Marketplace accounts receivable">
+            <article class="command-kpi emphasis"><span>Outstanding AR</span><strong id="marketplace-ar-total">USD 0.00</strong><small>USD-normalized total aligned to the client workbook.</small></article>
+          <article class="command-kpi"><span>FX-exposed AR</span><strong id="marketplace-ar-fx">USD 0.00</strong><small id="marketplace-ar-fx-note">Non-USD source balances.</small></article>
+            <article class="command-kpi"><span>Marketplace records</span><strong id="marketplace-ar-sources">0</strong><small id="marketplace-ar-source-note">Workbook rows and unique source coverage.</small></article>
+            <article class="command-kpi"><span>Quarantined rows</span><strong id="marketplace-ar-duplicates">0</strong><small id="marketplace-ar-duplicate-note">Controlled adjusted total excludes quarantined rows.</small></article>
+        </section>
+        <section class="ar-grid">
+          <section class="panel">
+            <div class="panel-title"><div><h2>AR by channel</h2><span>USD-normalized mix across the latest snapshot.</span></div></div>
+            <div id="marketplace-ar-channels" class="ar-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-title"><div><h2>FX exposure</h2><span>Original currencies, reported in USD.</span></div></div>
+            <div id="marketplace-ar-currencies" class="ar-list"></div>
+          </section>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><div><h2>Largest marketplace balances</h2><span>Top ten balances in USD.</span></div></div>
+          <div id="marketplace-ar-top" class="activity-table"></div>
+        </section>
+      </section>
+
+      <section id="sources" class="view">
+        <section class="section-hero">
+          <div>
+            <span class="strip-label">Sources</span>
+            <h2>Manage connections, authorization, synchronization, and input readiness.</h2>
+            <p>Every source shows its setup state separately from its authorization and data freshness.</p>
+          </div>
+          <div class="section-stat"><span>Amazon Accounts</span><strong id="sources-marketplace-count">-</strong></div>
+          <div class="section-stat"><span>Automatic Sync</span><strong id="sources-connected-count">-</strong></div>
+        </section>
+        <section class="panel integration-panel">
+          <div class="panel-title">
+            <div>
+              <h2>Amazon SP-API Integration</h2>
+              <span>Secure API authorization, automated settlement sync, and connection history</span>
+            </div>
+            <div class="integration-heading-actions">
+              <span id="amazon-source-count" class="muted">0 sources</span>
+              <span id="amazon-integration-status" class="integration-status">Loading</span>
+              <button id="amazon-add-source" type="button" class="secondary-button">Add Source</button>
+            </div>
+          </div>
+          <form id="amazon-integration-form" class="settings-form">
+            <div class="integration-source-picker">
+              <label for="amazon-source-select">Amazon Source</label>
+              <select id="amazon-source-select" aria-label="Select Amazon source"></select>
+            </div>
+            <div id="amazon-source-list" class="integration-source-list" aria-label="Imported Amazon sources"></div>
+            <div id="amazon-account-identity" class="integration-summary account-identity-summary" aria-label="Amazon account identity"></div>
+            <div class="integration-summary" id="amazon-integration-summary"></div>
+            <div class="form-grid integration-form-grid">
+              <label>Source Name<input id="amazon-source-name" placeholder="e.g. Books Amazon.Ca/Mx" maxlength="120" autocomplete="off"><small class="field-hint">Internal label used to keep seller accounts separated.</small></label>
+              <label>Application ID<input id="amazon-application-id" placeholder="amzn1.sp.solution…" autocomplete="off"><small class="field-hint">Your Selling Partner API application identifier.</small></label>
+              <label>Region<select id="amazon-endpoint"><option value="https://sellingpartnerapi-na.amazon.com">North America</option><option value="https://sellingpartnerapi-eu.amazon.com">Europe</option><option value="https://sellingpartnerapi-fe.amazon.com">Far East</option></select><small class="field-hint">Canada uses the North America endpoint.</small></label>
+              <label>Marketplace<input id="amazon-marketplace" value="Canada" autocomplete="off"></label>
+              <label>Sync Frequency<select id="amazon-sync-frequency"><option value="5">Every 5 minutes</option><option value="15">Every 15 minutes</option><option value="30">Every 30 minutes</option><option value="60">Hourly</option><option value="360">Every 6 hours</option><option value="1440">Daily</option></select></label>
+              <label>LWA Client ID<input id="amazon-client-id" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved value"></label>
+              <label>LWA Client Secret<input id="amazon-client-secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved value"></label>
+              <label class="integration-token-field">Refresh Token<input id="amazon-refresh-token" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved value"><small class="field-hint">Stored encrypted. It is never returned to the browser after saving.</small></label>
+              <label class="mode-toggle integration-enabled"><input id="amazon-enabled" type="checkbox"><span><strong>Enable automated API sync</strong><small>Activates this integration after authorization is complete.</small></span></label>
+            </div>
+            <div id="amazon-integration-message" class="integration-message" aria-live="polite"></div>
+            <div class="integration-actions">
+              <button id="amazon-remove-credentials" type="button" class="secondary-button danger-btn">Remove Credentials</button>
+              <span class="action-spacer"></span>
+              <button id="amazon-test-connection" type="button" class="secondary-button">Test Connection</button>
+              <button id="amazon-sync-now" type="button" class="secondary-button">Sync Now</button>
+              <button id="amazon-save-integration" type="submit" class="run-button inline">Save Integration</button>
+            </div>
+          </form>
+          <div class="integration-history">
+            <h3>Recent Sync Activity</h3>
+            <div id="amazon-sync-history" class="integration-history-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="payouts" class="view">
+        <section class="section-hero">
+          <div>
+            <span class="strip-label">Payouts</span>
+            <h2>Review current and expected marketplace payouts from Amazon.</h2>
+            <p>Open Amazon settlement groups remain visible until Amazon completes the transfer.</p>
+          </div>
+          <div class="section-stat"><span>Pending</span><strong id="review-count">-</strong></div>
+        </section>
+        <section class="settlement-summary">
+          <div><span>Expected Pending</span><strong id="settlement-pending-amount">-</strong></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Expected Cash Pending</h2><span>Open Amazon settlement groups</span></div>
+          <div id="unmatched-expected-table" class="settlement-card-grid"></div>
+        </section>
+        <section class="section-heading-row">
+          <div>
+            <span class="strip-label">Needs Attention</span>
+            <h2>Payout exceptions requiring review</h2>
+          </div>
+          <div class="inline-stats"><span>Total actions <strong id="action-total-count">-</strong></span></div>
+        </section>
+        <section class="action-summary">
+          <div><span>Pending Expected</span><strong id="action-pending-count">-</strong></div>
+          <div><span>Total Items</span><strong id="action-total-items">-</strong></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Items Needing Attention</h2><span>Marketplace payment review queue</span></div>
+          <div id="exceptions-table" class="action-card-grid"></div>
+        </section>
+        <section class="section-heading-row">
+          <div>
+            <span class="strip-label">Data Quality</span>
+            <h2>Import issues affecting financial confidence</h2>
+            <p>Missing fields, unsupported values, and mapping issues stay with the operational review queue.</p>
+          </div>
+          <div class="inline-stats"><span>Validation items <strong id="quality-count">-</strong></span></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Data Quality Issues</h2><span>Validation and completeness</span></div>
+          <div id="quality-list"></div>
+        </section>
+      </section>
+
+      <section id="admin" class="view">
+        <section class="section-hero">
+          <div>
+            <span class="strip-label">Admin Settings</span>
+            <h2>Manage workspace assumptions, governance, and users.</h2>
+            <p>Amazon accounts are managed in the encrypted SP-API registry under Sources.</p>
+          </div>
+          <div class="section-stat"><span>Currencies</span><strong id="settings-currency-count">-</strong></div>
+          <div class="section-stat"><span>Sources</span><strong id="settings-source-count">-</strong></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Administration</h2><span>Workspace and operating controls</span></div>
+          <form id="tenant-settings-form" class="settings-form">
+            <div class="settings-grid">
+              <section class="config-card">
+                <div class="config-card-title">
+                  <h3>Workspace Identity</h3>
+                  <span>Client workspace identity</span>
+                </div>
+                <div class="form-grid compact">
+                  <label>Product Name<input id="settings-product-name" name="product_name" placeholder="e.g. Cashflow Command Center"></label>
+                  <label>Group / Client<input id="settings-tenant-name" name="tenant_name" placeholder="e.g. Acme Group"></label>
+                  <label>Primary Entity<input id="settings-poc-entity" name="poc_entity" placeholder="e.g. Acme Inc."></label>
+                  <label>
+                    Logo Text
+                    <input id="settings-logo-text" name="logo_text" maxlength="4" placeholder="e.g. CC">
+                    <small class="field-hint">Up to 4 characters — shown as the sidebar icon.</small>
+                  </label>
+                </div>
+                <p class="intake-note">Amazon account names and credentials are managed in Sources.</p>
+              </section>
+              <section class="config-card">
+                <div class="config-card-title">
+                  <h3>Cash Settings</h3>
+                  <span>Currency and reconciliation assumptions</span>
+                </div>
+                <div class="form-grid compact">
+                  <label>
+                    Accent Color
+                    <input id="settings-primary-color" name="primary_color" type="color">
+                    <small class="field-hint">Sidebar and button accent color.</small>
+                  </label>
+                  <label>Currencies<input id="settings-currencies" name="currencies" placeholder="e.g. USD, CAD, EUR"></label>
+                  <label>
+                    Date Tolerance (days)
+                    <input id="settings-date-tolerance" name="date_tolerance_days" type="number" min="0" placeholder="e.g. 3">
+                    <small class="field-hint">How many days either side of the expected date a settlement can still be matched. Default: 3.</small>
+                  </label>
+                  <label>
+                    Amount Tolerance
+                    <input id="settings-amount-tolerance" name="amount_tolerance" inputmode="decimal" placeholder="e.g. 0.00">
+                    <small class="field-hint">Maximum difference allowed between expected and received amounts for a match. Use 0.00 for exact matching.</small>
+                  </label>
+                </div>
+              </section>
+            </div>
+
+            <div class="admin-console">
+              <section class="source-section">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Entities</h3>
+                    <p>Companies or treasury entities included in the solution.</p>
+                  </div>
+                  <button id="add-entity" type="button" class="secondary-button">Add Entity</button>
+                </div>
+                <div id="entities-editor" class="setup-card-grid"></div>
+              </section>
+
+              <section class="source-section">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Planned Outflows</h3>
+                    <p>Vendor, payroll, tax, debt, and other committed cash requirements.</p>
+                  </div>
+                  <button id="add-outflow" type="button" class="secondary-button">Add Outflow</button>
+                </div>
+                <div id="outflows-editor" class="setup-card-grid"></div>
+              </section>
+
+              <section class="source-section">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Forecast Horizons</h3>
+                    <p>Time windows the client wants to see in cash forecasts.</p>
+                  </div>
+                  <button id="add-horizon" type="button" class="secondary-button">Add Horizon</button>
+                </div>
+                <div id="horizons-editor" class="setup-card-grid compact-cards"></div>
+              </section>
+
+              <section class="source-section">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Alert Rules</h3>
+                    <p>Thresholds and exception triggers that should notify finance users.</p>
+                  </div>
+                  <button id="add-alert" type="button" class="secondary-button">Add Alert</button>
+                </div>
+                <div id="alerts-editor" class="setup-card-grid"></div>
+              </section>
+
+              <section class="source-section">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Users & Roles</h3>
+                    <p>Client roles, review ownership, and entity-level access scope.</p>
+                  </div>
+                  <button id="add-role" type="button" class="secondary-button">Add Role</button>
+                </div>
+                <div id="roles-editor" class="setup-card-grid"></div>
+              </section>
+
+              <section class="source-section governance-card">
+                <div class="source-editor-header">
+                  <div>
+                    <h3>Governance Settings</h3>
+                    <p>Data retention, hosting location, and AI approval guardrails.</p>
+                  </div>
+                </div>
+                <div class="form-grid compact">
+                  <label>
+                    Data Retention
+                    <input id="settings-data-retention" placeholder="e.g. 12 months">
+                    <small class="field-hint">How long transaction and report data should be kept.</small>
+                  </label>
+                  <label>
+                    Hosting Region
+                    <input id="settings-hosting-region" placeholder="e.g. US East, Canada, EU">
+                    <small class="field-hint">Where the application and data are hosted.</small>
+                  </label>
+                </div>
+                <div class="governance-toggles">
+                  <label class="mode-toggle">
+                    <input id="settings-ai-enabled" type="checkbox">
+                    <span><strong>AI intelligence enabled</strong><small>Keep off until source data is stable and reconciliation is working correctly.</small></span>
+                  </label>
+                  <label class="mode-toggle">
+                    <input id="settings-human-approval" type="checkbox">
+                    <span><strong>Human approval required before acting on recommendations</strong><small>Any AI-generated suggestions require a finance reviewer to approve before action is taken.</small></span>
+                  </label>
+                </div>
+              </section>
+            </div>
+
+            <div class="form-actions">
+              <span id="settings-save-status" class="muted"></span>
+              <button id="save-settings" type="submit" class="run-button inline">Save Configuration</button>
+            </div>
+          </form>
+        </section>
+      </section>
+      <footer class="app-footer">Powered by Neksoft Global Services Pvt. Ltd.</footer>
+    </main>
+  </div>
+  <script src="/assets/app.js?v=20260804-financial-meaning-review"></script>
+</body>
+</html>

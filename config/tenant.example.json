@@ -1,0 +1,103 @@
+{
+  "product_name": "Cashflow Command Center",
+  "tenant_name": "Ergode Group",
+  "poc_entity": "Ergode Inc.",
+  "demo_mode": false,
+  "brand": {
+    "primary_color": "#087f7a",
+    "logo_text": "CC"
+  },
+  "currencies": ["USD"],
+  "reconciliation": {
+    "date_tolerance_days": 3,
+    "amount_tolerance": "0.00",
+    "usd_exchange_rates": {
+      "USD": "1",
+      "CAD": "0.7130332048",
+      "MXN": "0.05738406337",
+      "AUD": "0.7008311942"
+    },
+    "usd_exchange_rates_as_of": "2026-07-16",
+    "usd_exchange_rates_source": "Configured tenant FX table",
+    "usd_exchange_rates_max_age_days": 7
+  },
+  "sources": {
+    "marketplaces": [
+      {
+        "name": "Amazon Seller Central - FastMediaMX Canada",
+        "type": "Marketplace portal report",
+        "status": "Awaiting actual upload",
+        "owner": "Marketplace operations",
+        "frequency": "Daily",
+        "evidence_type": "Amazon Payments transaction report",
+        "api_endpoint": "",
+        "credential_reference": ""
+      },
+      {
+        "name": "Amazon SP-API - FastMediaMX Canada",
+        "type": "Marketplace API",
+        "status": "Developer registration under review",
+        "owner": "Finance analyst",
+        "frequency": "Pending approval",
+        "evidence_type": "SP-API authorization",
+        "api_endpoint": "",
+        "credential_reference": ""
+      }
+    ],
+    "banks": []
+  },
+  "client_setup": {
+    "entities": [
+      {
+        "name": "Ergode Inc.",
+        "currency": "USD",
+        "status": "Active entity"
+      }
+    ],
+    "planned_outflows": [
+      {
+        "name": "Vendor payments",
+        "category": "Operating outflow",
+        "amount": "To be confirmed",
+        "frequency": "Weekly"
+      },
+      {
+        "name": "Payroll",
+        "category": "Payroll",
+        "amount": "To be confirmed",
+        "frequency": "Monthly"
+      }
+    ],
+    "forecast_horizons": ["Daily", "7 days", "14 days", "30 days", "60 days"],
+    "alert_rules": [
+      {
+        "name": "Delayed payout",
+        "trigger": "Expected receipt is past tolerance window",
+        "recipient": "Finance owner"
+      },
+      {
+        "name": "Low bank balance",
+        "trigger": "Available balance below threshold",
+        "recipient": "CFO office"
+      }
+    ],
+    "user_roles": [
+      {
+        "name": "CFO Office",
+        "role": "Approver",
+        "scope": "All entities"
+      },
+      {
+        "name": "Finance Analyst",
+        "role": "Reviewer",
+        "scope": "Assigned entities"
+      }
+    ],
+    "governance": {
+      "data_retention": "To be confirmed",
+      "hosting_region": "To be confirmed",
+      "ai_enabled": false,
+      "human_approval_required": true
+    }
+  }
+}

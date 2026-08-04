@@ -1,0 +1,12 @@
+[project]
+name = "ai-cashflow"
+version = "0.1.0"
+description = "Phase 0 scaffold for cash flow consolidation and reconciliation."
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=48,<49",
+    "fastapi>=0.115,<1.0",
+    "httpx>=0.28,<1.0",
+    "python-multipart>=0.0.20,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+]

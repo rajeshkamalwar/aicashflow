@@ -1,0 +1,5 @@
+receipt_id,bank_account,currency,receipt_date,amount,reference
+BOA-001,Bank of America - Ergode Inc. Operating,USD,2026-05-20,12500.00,SETTLEMENT-API1-001
+BOA-002,Bank of America - Ergode Inc. Operating,USD,2026-05-20,6750.25,SETTLEMENT-PORTAL1-001
+BOA-003,Bank of America - Ergode Inc. Operating,USD,2026-05-21,8900.50,SETTLEMENT-API1-002
+BOA-004,Bank of America - Ergode Inc. Operating,USD,2026-05-22,500.00,UNMATCHED-BANK-001

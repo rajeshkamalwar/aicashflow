@@ -1,0 +1,8 @@
+"Includes Amazon Marketplace, Fulfillment by Amazon (FBA), and Amazon Webstore transactions"
+"All amounts in CAD, unless specified"
+"Definitions:"
+"Date/Time: Posted date/time of the transaction"
+"Note: Reports with a start date of Jan 1, 2025 or later are indexed by posted date, include both released and deferred transactions and have two new columns."
+"date/time","settlement id","type","order id","sku","description","quantity","marketplace","fulfillment","order city","order state","order postal","tax collection model","product sales","product sales tax","shipping credits","shipping credits tax","gift wrap credits","gift wrap credits tax","Regulatory fee","Tax on regulatory fee","promotional rebates","promotional rebates tax","marketplace withheld tax","selling fees","fba fees","other transaction fees","other","total","Transaction status","Transaction Release Date"
+"May 26, 2026 5:21:09 a.m. PDT","26483211921","Order","SAMPLE-ORDER-1","SAMPLE-SKU-1","Sample book title","1","amazon.ca","Seller","Sample City","ON","A1A 1A1","","75.71","0","0","0","0","0","0","0","0","0","0","-12.36","0","0","0","63.35","Deferred",""
+"May 26, 2026 8:35:12 a.m. PDT","26483211921","Refund","SAMPLE-ORDER-2","SAMPLE-SKU-2","Sample refund title","1","amazon.ca","Seller","Sample City","BC","A1A 1A1","","-30.00","0","0","0","0","0","0","0","0","0","0","4.50","0","0","0","-25.50","Released","2026-06-01"
