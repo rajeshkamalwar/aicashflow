@@ -1678,7 +1678,7 @@ function renderOverviewExceptionSnapshot() {
   const expected = scopedRows(state.unmatchedExpected);
   const quality = state.dataQuality || [];
   const items = [
-    ["Pending marketplace payouts", expected.length, "Open Amazon settlement groups awaiting completion"],
+    ["Open settlement groups", expected.length, "Amazon financial event groups currently being processed."],
     ["Data-quality checks", quality.length, "Validation items from the latest report generation"],
   ];
   document.getElementById("overview-exception-snapshot").innerHTML = items.map(([label, count, note]) =>

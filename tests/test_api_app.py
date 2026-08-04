@@ -57,6 +57,18 @@ class ApiAppTests(unittest.TestCase):
         self.assertIn('renderAvailability(position, "UPCOMING_PAYOUT"', app_js)
         self.assertIn("&currency=", app_js)
 
+    def test_overview_labels_open_financial_event_groups_as_settlement_groups(self):
+        web_root = Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web"
+        app_js = (web_root / "app.js").read_text(encoding="utf-8")
+        app_html = (web_root / "app.html").read_text(encoding="utf-8")
+
+        self.assertIn('"Open settlement groups"', app_js)
+        self.assertIn("Amazon financial event groups currently being processed.", app_js)
+        self.assertIn("Settlement status", app_html)
+        self.assertIn("View open groups", app_html)
+        self.assertNotIn("Pending marketplace payouts", app_js + app_html)
+        self.assertNotIn("Open payouts", app_js + app_html)
+
     def test_cashflow_proof_endpoints_are_protected_and_paginated(self):
         class FakeService:
             config = SimpleNamespace(api_key="", max_upload_bytes=1024 * 1024)
