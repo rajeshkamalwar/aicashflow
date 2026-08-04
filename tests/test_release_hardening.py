@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -21,9 +23,17 @@ from security_helpers import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BASH = str(Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe")
+if not Path(BASH).is_file():
+    BASH = "bash"
 
 
 class ReleaseHardeningTests(unittest.TestCase):
+    @staticmethod
+    def _bash_function(script: str, name: str) -> str:
+        start = script.index(f"{name}() {{")
+        return script[start:script.index("\n}", start) + 2]
+
     def test_dashboard_frontend_is_resilient_to_currency_and_api_failures(self):
         javascript = (ROOT / "src/ai_cashflow/web/app.js").read_text(encoding="utf-8")
 
@@ -251,9 +261,72 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("StartLimitIntervalSec=", deploy)
         self.assertIn("StartLimitBurst=", deploy)
         self.assertNotIn("Restart=always", deploy)
+        self.assertIn('PYTHON="${AI_CASHFLOW_PYTHON_BIN:-/usr/bin/python3.12}"', deploy)
+        self.assertIn("validate_python || exit 1", deploy)
+        self.assertIn("|| ! wait_for_application", deploy)
+        self.assertLess(deploy.index("|| ! wait_for_application"), deploy.index("restore_previous_release", deploy.index("|| ! wait_for_application")))
         self.assertIn("previous", rollback.lower())
         self.assertIn("mv -T", rollback)
         self.assertIn("--hash=sha256:", lock)
+
+    def test_configured_python_312_is_used_and_missing_interpreter_is_rejected(self):
+        deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+        function = self._bash_function(deploy, "validate_python")
+        with TemporaryDirectory() as temp_dir:
+            fake = Path(temp_dir) / "python3.12"
+            marker = Path(f"{fake}.called")
+            fake.write_text('#!/usr/bin/env bash\nprintf "%s" "$*" > "${0}.called"\n', encoding="utf-8", newline="\n")
+            fake.chmod(0o755)
+            accepted = subprocess.run(
+                [BASH, "-c", f'PYTHON="{fake.as_posix()}"\n{function}\nvalidate_python'],
+                capture_output=True, text=True,
+            )
+            missing = subprocess.run(
+                [BASH, "-c", f'PYTHON="{(Path(temp_dir) / "missing").as_posix()}"\n{function}\nvalidate_python'],
+                capture_output=True, text=True,
+            )
+            marker_text = marker.read_text(encoding="utf-8")
+
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertIn("sys.version_info", marker_text)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("interpreter is unavailable", missing.stderr)
+
+    def test_listener_readiness_retries_and_timeout_is_rollback_gated(self):
+        deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+        function = self._bash_function(deploy, "wait_for_application")
+        delayed = subprocess.run(
+            [BASH, "-c", f'''SERVICE=aicashflow
+READINESS_TIMEOUT_SECONDS=5
+READINESS_INTERVAL_SECONDS=0
+counter=$(mktemp)
+echo 0 > "$counter"
+systemctl() {{ return 0; }}
+ss() {{ n=$(cat "$counter"); n=$((n+1)); echo "$n" > "$counter"; (( n >= 3 )) && echo "LISTEN 0 1 127.0.0.1:8001 0.0.0.0:*"; }}
+curl() {{ printf '{{"status":"ok"}}'; }}
+sleep() {{ :; }}
+{function}
+wait_for_application
+[[ $(cat "$counter") -eq 3 ]]
+'''], capture_output=True, text=True,
+        )
+        timed_out = subprocess.run(
+            [BASH, "-c", f'''SERVICE=aicashflow
+READINESS_TIMEOUT_SECONDS=1
+READINESS_INTERVAL_SECONDS=0.1
+systemctl() {{ return 0; }}
+ss() {{ :; }}
+curl() {{ printf '{{"status":"ok"}}'; }}
+{function}
+wait_for_application
+'''], capture_output=True, text=True,
+        )
+
+        self.assertEqual(delayed.returncode, 0, delayed.stderr)
+        self.assertNotEqual(timed_out.returncode, 0)
+        self.assertIn("readiness timed out", timed_out.stderr.lower())
+        failure_block = deploy[deploy.index("if ! systemctl restart"):]
+        self.assertLess(failure_block.index("wait_for_application"), failure_block.index("restore_previous_release"))
 
     def test_nginx_has_canonical_redirect_and_explicit_body_limit(self):
         nginx = (ROOT / "nginx_vhost.conf").read_text(encoding="utf-8")
@@ -271,6 +344,9 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertNotIn(secret, verifier)
         self.assertIn('echo "[PASS] $label"', verifier)
         self.assertIn('echo "[FAIL] $label"', verifier)
+        deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+        self.assertNotIn("set -x", deploy)
+        self.assertNotIn('echo "$AI_CASHFLOW_', deploy)
 
 
 if __name__ == "__main__":

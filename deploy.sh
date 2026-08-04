@@ -8,7 +8,9 @@ ENV_FILE="/etc/aicashflow/aicashflow.env"
 ASSERTION_FILE="/etc/nginx/aicashflow/proxy-assertion.conf"
 HTPASSWD_FILE="/etc/nginx/.htpasswd-aicashflow"
 SERVICE="aicashflow"
-PYTHON="python3.11"
+PYTHON=""
+READINESS_TIMEOUT_SECONDS="${AI_CASHFLOW_DEPLOY_READINESS_TIMEOUT_SECONDS:-30}"
+READINESS_INTERVAL_SECONDS="${AI_CASHFLOW_DEPLOY_READINESS_INTERVAL_SECONDS:-1}"
 COMMIT=""
 REPOSITORY="${AI_CASHFLOW_REPOSITORY_URL:-}"
 
@@ -43,6 +45,42 @@ check_file "$ENV_FILE" "root:aicashflow" "640"
 check_file "$ASSERTION_FILE" "root:root" "600"
 check_file "$HTPASSWD_FILE" "root:www-data" "640"
 id -u aicashflow >/dev/null 2>&1 || { echo "The aicashflow service account is missing." >&2; exit 1; }
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+PYTHON="${AI_CASHFLOW_PYTHON_BIN:-/usr/bin/python3.12}"
+
+validate_python() {
+  [[ -x "$PYTHON" ]] || {
+    echo "Configured Python interpreter is unavailable: $PYTHON" >&2
+    return 1
+  }
+  "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' || {
+    echo "Configured Python interpreter must be Python 3.12: $PYTHON" >&2
+    return 1
+  }
+}
+
+wait_for_application() {
+  local deadline=$((SECONDS + READINESS_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if systemctl is-active --quiet "$SERVICE" \
+      && ss -ltn | grep -qE '127\.0\.0\.1:8001[[:space:]]' \
+      && [[ "$(curl -fsS --max-time 2 http://127.0.0.1:8001/health 2>/dev/null || true)" == '{"status":"ok"}' ]]; then
+      return 0
+    fi
+    sleep "$READINESS_INTERVAL_SECONDS"
+  done
+  echo "Application readiness timed out after ${READINESS_TIMEOUT_SECONDS}s." >&2
+  return 1
+}
+
+[[ "$READINESS_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Deployment readiness timeout must be a positive integer." >&2; exit 1;
+}
+validate_python || exit 1
 
 SOURCE_ROOT="$(mktemp -d /tmp/aicashflow-release.XXXXXX)"
 SOURCE_CHECKOUT="$SOURCE_ROOT/source"
@@ -114,7 +152,7 @@ restore_previous_release() {
   if [[ -n "$OLD_RELEASE" && -d "$OLD_RELEASE" ]]; then
     ln -s "$OLD_RELEASE" "${CURRENT_LINK}.rollback"
     mv -Tf "${CURRENT_LINK}.rollback" "$CURRENT_LINK"
-    systemctl restart "$SERVICE"
+    systemctl restart "$SERVICE" && wait_for_application
   fi
 }
 
@@ -126,7 +164,9 @@ mv -Tf "${PREVIOUS_LINK}.next" "$PREVIOUS_LINK"
 ln -s "$RELEASE_DIR" "${CURRENT_LINK}.next"
 mv -Tf "${CURRENT_LINK}.next" "$CURRENT_LINK"
 
-if ! systemctl restart "$SERVICE" || ! bash "$RELEASE_DIR/verify-production.sh" --post-deploy "$COMMIT"; then
+if ! systemctl restart "$SERVICE" \
+  || ! wait_for_application \
+  || ! bash "$RELEASE_DIR/verify-production.sh" --post-deploy "$COMMIT"; then
   echo "Post-start checks failed; restoring the previous release." >&2
   restore_previous_release
   exit 1

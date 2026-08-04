@@ -179,6 +179,12 @@ sudo bash deploy.sh \
   --repository <approved-private-git-url>
 ```
 
+`AI_CASHFLOW_PYTHON_BIN` selects the deployment interpreter and defaults to
+`/usr/bin/python3.12`. The deploy stops unless that exact configured executable
+exists and reports Python 3.12. After restart it waits up to 30 seconds for the
+service, loopback listener, and exact health response before verification; a
+timeout restores the previous release.
+
 The script clones the requested commit into a temporary clean checkout,
 verifies the exact revision and clean tree, archives only committed files,
 installs the hashed lock in a new virtual environment, validates production
