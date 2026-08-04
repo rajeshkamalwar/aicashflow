@@ -438,10 +438,25 @@ nav {
 
 .overview-financial-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1.45fr) repeat(3, minmax(180px, .75fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 16px;
 }
+
+[hidden] { display: none !important; }
+
+.overview-availability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.availability-section { margin-bottom: 16px; }
+
+.coverage-warning { color: #8a5208 !important; }
+.transaction-breakdown { margin-bottom: 16px; }
+.transaction-breakdown summary { cursor: pointer; font-weight: 800; }
+.transaction-breakdown #overview-transaction-composition { margin-top: 12px; }
 
 .command-kpi {
   min-width: 0;
@@ -3722,7 +3737,8 @@ input[type="color"] {
 
   .treasury-kpi-grid { grid-template-columns: 1fr; }
 
-  .overview-financial-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-financial-grid,
+  .overview-availability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
   .open-balance-card { grid-column: 1 / -1; }
 
@@ -3753,6 +3769,7 @@ input[type="color"] {
 
 @media (max-width: 760px) {
   .overview-financial-grid,
+  .overview-availability-grid,
   .source-status-grid {
     grid-template-columns: 1fr;
   }

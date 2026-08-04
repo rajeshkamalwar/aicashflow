@@ -1046,6 +1046,63 @@ function renderAvailability(position, type, cashId, noteId, fallback) {
   setText(noteId, unavailableFinancialValue(position, type, fallback));
 }
 
+function renderTransactionVisibility(position) {
+  const enabled = Boolean(position?.transaction_visibility_enabled);
+  const cards = ["overview-deferred-card", "overview-released-card", "overview-completed-payout-card"];
+  cards.forEach((id) => { document.getElementById(id).hidden = !enabled; });
+  const breakdown = document.getElementById("overview-transaction-breakdown");
+  breakdown.hidden = !enabled;
+  if (!enabled) return;
+
+  const visibility = position?.transaction_visibility || {};
+  const entries = visibility.by_currency && typeof visibility.by_currency === "object"
+    ? Object.entries(visibility.by_currency)
+    : (visibility.currency ? [[visibility.currency, visibility]] : []);
+  const moneyRows = (selector) => entries.map(([currency, row]) => ({
+    currency,
+    amount: row?.[selector],
+  }));
+  const renderRows = (target, rows) => {
+    const element = document.getElementById(target);
+    element.className = "open-balance-list";
+    element.innerHTML = rows.length
+      ? rows.map(({ currency, amount }) => `<span><b>${escapeHtml(currency)}</b><span>${escapeHtml(formatMoney(moneyNumber(amount)))}</span></span>`).join("")
+      : "Unavailable";
+  };
+  renderRows("overview-deferred-transactions", moneyRows("deferred_amount"));
+
+  const releasedRows = [];
+  entries.forEach(([currency, row]) => {
+    releasedRows.push({ currency: `${currency} Released`, amount: row?.released_amount });
+    releasedRows.push({ currency: `${currency} Previously Deferred, Released During Observed Period`, amount: row?.deferred_released_amount });
+  });
+  renderRows("overview-released-transactions", releasedRows);
+
+  const completed = position?.recent_completed_payouts && typeof position.recent_completed_payouts === "object"
+    ? Object.entries(position.recent_completed_payouts)
+    : (position?.recent_completed_payout ? [[position.recent_completed_payout.currency, position.recent_completed_payout]] : []);
+  renderRows("overview-completed-payout", completed.map(([currency, row]) => ({ currency, amount: row?.amount })));
+  setText("overview-completed-payout-note", completed.length
+    ? completed.map(([, row]) => `${row.transfer_date || "Date unavailable"} · ${row.financial_event_group_id || "ID unavailable"}`).join(" · ")
+    : "No canonical Closed financial event group is available in this scope.");
+
+  const coverageStarts = entries.map(([, row]) => row?.coverage_start).filter(Boolean).sort();
+  const coverageEnds = entries.map(([, row]) => row?.coverage_end).filter(Boolean).sort();
+  const retrieved = entries.map(([, row]) => row?.retrieved_at).filter(Boolean).sort();
+  document.getElementById("overview-deferred-meta").innerHTML = `
+    <span><b>Classification</b> AMAZON_TRANSACTION_DERIVED</span>
+    <span><b>Coverage</b> ${escapeHtml(coverageStarts[0] || "Unavailable")} to ${escapeHtml(coverageEnds.at(-1) || "Unavailable")}</span>
+    <span><b>Retrieved</b> ${escapeHtml(retrieved.at(-1) || "Unavailable")}</span>`;
+
+  const composition = [];
+  entries.forEach(([currency, row]) => {
+    Object.entries(row?.composition || {}).forEach(([bucket, amount]) => {
+      composition.push(`<div class="payout-forecast-row"><b>${escapeHtml(currency)}</b><span>${escapeHtml(bucket)}</span><strong>${escapeHtml(formatMoney(moneyNumber(amount)))}</strong></div>`);
+    });
+  });
+  document.getElementById("overview-transaction-composition").innerHTML = composition.join("") || '<div class="empty-state">No component-level amounts were returned for this scope.</div>';
+}
+
 function renderTreasuryOverview() {
   const sources = filteredSources();
   const position = state.amazonFinancialPosition;
@@ -1054,6 +1111,9 @@ function renderTreasuryOverview() {
   setText("overview-reserve-label", "Current reserve");
   setText("overview-funds-label", "Funds available after reserve");
   setText("overview-upcoming-label", "Upcoming payout");
+  renderTransactionVisibility(
+    position?.source_id === state.filters.sourceId ? position : null
+  );
 
   if (position?.status === "ready" && position.source_id === state.filters.sourceId) {
     const balances = nativeOpenBalances(position);

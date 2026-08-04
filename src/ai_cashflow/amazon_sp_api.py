@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import gzip
 import json
+from time import sleep
 from urllib.parse import urlparse
 
 import httpx
@@ -72,6 +73,31 @@ class AmazonSpApiClient:
                 return self._list_financial_event_groups(http, token, started_after)
         token = self._access_token(self.http)
         return self._list_financial_event_groups(self.http, token, started_after)
+
+    def list_transactions_by_status(
+        self,
+        marketplace_id: str,
+        transaction_status: str,
+        posted_after: datetime,
+    ) -> list[dict[str, object]]:
+        """Fetch one bounded status window for persisted background synchronization."""
+        allowed = {"DEFERRED", "DEFERRED_RELEASED", "RELEASED"}
+        if transaction_status not in allowed:
+            raise ValueError(f"Unsupported Amazon transaction status: {transaction_status}.")
+        if posted_after.tzinfo is None:
+            posted_after = posted_after.replace(tzinfo=timezone.utc)
+        if self.http is None:
+            with httpx.Client(timeout=30.0) as http:
+                token = self._access_token(http)
+                return self._list_transactions(
+                    http, token, marketplace_id=marketplace_id,
+                    posted_after=posted_after, transaction_status=transaction_status,
+                )
+        token = self._access_token(self.http)
+        return self._list_transactions(
+            self.http, token, marketplace_id=marketplace_id,
+            posted_after=posted_after, transaction_status=transaction_status,
+        )
 
     def get_current_balances(
         self,
@@ -315,6 +341,25 @@ class AmazonSpApiClient:
                     calculation_method=None,
                     availability_reason=unavailable_reason,
                 ))
+        recent_completed_payouts = {}
+        for group in canonical:
+            if str(group.get("ProcessingStatus", "")).lower() != "closed":
+                continue
+            amount, currency = self._money(group.get("OriginalTotal"), "closed financial event group total")
+            candidate = {
+                "amount": self._format_money(amount),
+                "currency": currency,
+                "transfer_date": group.get("FundTransferDate"),
+                "transfer_status": group.get("FundTransferStatus"),
+                "financial_event_group_id": self._mask_identifier(
+                    str(group.get("FinancialEventGroupId") or "")
+                ),
+                "_key": self._group_observation_key(group, now),
+            }
+            if currency not in recent_completed_payouts or candidate["_key"] > recent_completed_payouts[currency]["_key"]:
+                recent_completed_payouts[currency] = candidate
+        for payout in recent_completed_payouts.values():
+            payout.pop("_key", None)
         return {
             "status": "ready" if balances else "unavailable",
             "mode": "amazon_open_balances",
@@ -331,6 +376,7 @@ class AmazonSpApiClient:
                 "current_balance": self._format_money(total_usd) if balances else None
             },
             "expected_payout_forecasts": [],
+            "recent_completed_payouts": recent_completed_payouts,
             "financial_values": financial_values,
             "validation": {
                 "status": "passed",
@@ -473,18 +519,6 @@ class AmazonSpApiClient:
         )
         self._require_currency(source_currency, beginning_currency)
 
-        deferred_transactions = self._list_transactions(
-            http,
-            token,
-            marketplace_id=marketplace_id,
-            posted_after=now - timedelta(days=179),
-            transaction_status="DEFERRED",
-        )
-        deferred_balance = self._sum_transactions(
-            deferred_transactions,
-            source_currency,
-        )
-
         period_start = str(open_group.get("FinancialEventGroupStart", ""))
         if not period_start:
             raise AmazonSpApiError(
@@ -504,8 +538,8 @@ class AmazonSpApiClient:
 
         source_amounts = {
             "standard_balance": standard_balance,
-            "deferred_balance": deferred_balance,
-            "total_balance": standard_balance + deferred_balance,
+            "deferred_balance": None,
+            "total_balance": None,
             "funds_available": None,
             "beginning_balance": beginning_balance,
             "reserve_balance": None,
@@ -540,30 +574,6 @@ class AmazonSpApiClient:
                 is_authoritative=True,
                 authoritative_for="AMAZON_REPORTED_BEGINNING_BALANCE",
                 calculation_method="DIRECT_SP_API_FIELD",
-            ),
-            self._financial_value(
-                value_type="DEFERRED_BALANCE",
-                amount=deferred_balance,
-                currency=source_currency,
-                source_field="listTransactions.totalAmount",
-                processing_status="Deferred",
-                retrieved_at=retrieved_at,
-                effective_at=None,
-                is_authoritative=True,
-                authoritative_for="AMAZON_REPORTED_DEFERRED_BALANCE",
-                calculation_method="SUM_DEFERRED_TRANSACTIONS",
-            ),
-            self._financial_value(
-                value_type="TOTAL_BALANCE",
-                amount=standard_balance + deferred_balance,
-                currency=source_currency,
-                source_field=None,
-                processing_status=None,
-                retrieved_at=retrieved_at,
-                effective_at=period_start,
-                is_authoritative=False,
-                authoritative_for="APPLICATION_CALCULATED_TOTAL_BALANCE",
-                calculation_method="OPEN_BALANCE_PLUS_DEFERRED_BALANCE",
             ),
         ]
         for value_type, reason in (
@@ -612,7 +622,16 @@ class AmazonSpApiClient:
             "settlement_period_start": period_start,
             "recent_payout_date": recent_payout_date,
             "recent_payout_status": recent_payout_status,
-            "deferred_transaction_count": len(deferred_transactions),
+            "deferred_transaction_count": None,
+            "recent_completed_payout": ({
+                "amount": self._format_money(recent_payout),
+                "currency": source_currency,
+                "transfer_date": recent_payout_date,
+                "transfer_status": recent_payout_status,
+                "financial_event_group_id": self._mask_identifier(
+                    str(latest_closed.get("FinancialEventGroupId") or "")
+                ),
+            } if latest_closed is not None else None),
             "group_count": settlement_status["openSettlementGroupCount"],
             **settlement_status,
             "funds_available_status": "unavailable",
@@ -648,10 +667,16 @@ class AmazonSpApiClient:
             },
             "api_data_validation": {
                 "status": "passed",
-                "records_parsed": len(deferred_transactions) + len(scoped_groups),
-                "deduplicated_by": "transactionId and FinancialEventGroupId",
+                "records_parsed": len(scoped_groups),
+                "deduplicated_by": "FinancialEventGroupId",
             },
         }
+
+    @staticmethod
+    def _mask_identifier(value: str) -> str:
+        if len(value) <= 8:
+            return "****" if value else ""
+        return f"{value[:4]}…{value[-4:]}"
 
     def _list_financial_event_groups(
         self,
@@ -736,11 +761,20 @@ class AmazonSpApiClient:
             page_params = dict(params)
             if next_token:
                 page_params["nextToken"] = next_token
-            response = http.get(
-                f"{self.config.endpoint}/finances/2024-06-19/transactions",
-                headers={"x-amz-access-token": token},
-                params=page_params,
-            )
+            for attempt in range(3):
+                response = http.get(
+                    f"{self.config.endpoint}/finances/2024-06-19/transactions",
+                    headers={"x-amz-access-token": token},
+                    params=page_params,
+                )
+                if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                    break
+                retry_after = response.headers.get("Retry-After", "0")
+                try:
+                    delay = min(max(float(retry_after), 0), 2)
+                except ValueError:
+                    delay = 0
+                sleep(delay or 0.05 * (2 ** attempt))
             self._raise_for_status(response, "list finance transactions")
             payload = response.json().get("payload")
             if not isinstance(payload, dict):

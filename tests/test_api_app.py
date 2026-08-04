@@ -27,6 +27,17 @@ def create_app():
 
 
 class ApiAppTests(unittest.TestCase):
+    def test_phase2a_transaction_visibility_wording_is_coverage_qualified(self):
+        web_root = Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web"
+        content = (web_root / "app.html").read_text(encoding="utf-8") + (web_root / "app.js").read_text(encoding="utf-8")
+        self.assertIn("API-Derived Deferred Transactions", content)
+        self.assertIn("Released During Observed Period", content)
+        self.assertIn("Previously Deferred, Released During Observed Period", content)
+        self.assertIn("Most Recent Completed Payout", content)
+        self.assertIn("Observed within the last 179 days", content)
+        self.assertIn("AMAZON_TRANSACTION_DERIVED", content)
+        self.assertNotIn("open plus deferred", content.lower())
+
     def test_overview_loads_current_cash_positions_for_all_connected_sources(self):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
 

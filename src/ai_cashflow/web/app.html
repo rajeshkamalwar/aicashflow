@@ -86,6 +86,28 @@
             <div id="overview-open-balance-meta" class="open-balance-meta"></div>
             <div id="overview-fx-estimate" class="fx-estimate"></div>
           </article>
+          <article id="overview-deferred-card" class="command-kpi transaction-visibility-card" hidden>
+            <span>API-Derived Deferred Transactions</span>
+            <strong id="overview-deferred-transactions">Unavailable</strong>
+            <small>Transactions currently returned with DEFERRED status within the Amazon API coverage window.</small>
+            <small class="coverage-warning">Observed within the last 179 days. Older outstanding deferred transactions may not be represented if Amazon does not return them within the supported query window.</small>
+            <div id="overview-deferred-meta" class="open-balance-meta"></div>
+          </article>
+          <article id="overview-released-card" class="command-kpi transaction-visibility-card" hidden>
+            <span>Released During Observed Period</span>
+            <strong id="overview-released-transactions">Unavailable</strong>
+            <small>Previously Deferred, Released During Observed Period</small>
+          </article>
+          <article id="overview-completed-payout-card" class="command-kpi transaction-visibility-card" hidden>
+            <span>Most Recent Completed Payout</span>
+            <strong id="overview-completed-payout">Unavailable</strong>
+            <small id="overview-completed-payout-note">Latest canonical Closed financial event group for each currency.</small>
+          </article>
+        </section>
+
+        <section class="availability-section" aria-labelledby="availability-heading">
+          <div class="panel-title"><div><h2 id="availability-heading">Availability</h2><span>Values remain unavailable unless Amazon supplies an authoritative basis.</span></div></div>
+          <div class="overview-availability-grid">
           <article class="command-kpi availability-card">
             <span id="overview-reserve-label">Current reserve</span>
             <strong id="overview-reserve-cash">Unavailable</strong>
@@ -101,7 +123,13 @@
             <strong id="overview-upcoming-cash">Unavailable</strong>
             <small id="overview-upcoming-note">Amazon SP-API has not supplied an authoritative upcoming payout amount and transfer date.</small>
           </article>
+          </div>
         </section>
+
+        <details id="overview-transaction-breakdown" class="panel transaction-breakdown" hidden>
+          <summary>Transaction composition</summary>
+          <div id="overview-transaction-composition"></div>
+        </details>
 
         <section class="panel api-validation-panel" aria-labelledby="api-validation-heading">
           <div class="panel-title"><div><h2 id="api-validation-heading">API Data Validation</h2><span>Technical processing status is separate from Seller Central reconciliation.</span></div></div>

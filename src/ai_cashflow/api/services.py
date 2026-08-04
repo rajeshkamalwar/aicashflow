@@ -809,7 +809,12 @@ class Phase0Service:
             "usd_rate_as_of": (
                 self.config.tenant.reconciliation.usd_exchange_rates_as_of
             ),
+            "transaction_visibility_enabled": self.config.transaction_visibility_enabled,
         })
+        if self.config.transaction_visibility_enabled:
+            result["transaction_visibility"] = registry.transaction_visibility(
+                source_id, requested_currency or None
+            )
         retrieved_at = str(
             result.get("as_of")
             or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

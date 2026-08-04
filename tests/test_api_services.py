@@ -26,6 +26,42 @@ def make_service(root: Path) -> Phase0Service:
 
 
 class Phase0ServiceTests(unittest.TestCase):
+    def test_financial_position_attaches_persisted_transaction_visibility_only_when_enabled(self):
+        class FakePositionClient:
+            def __init__(self, _config):
+                pass
+            def get_financial_position(self, _marketplace_id, _usd_rate, *, expected_currency=None):
+                return {
+                    "status": "ready", "currency": "USD", "source_currency": "CAD",
+                    "as_of": "2026-08-04T10:00:00Z", "amounts": {"standard_balance": "10.00"},
+                    "source_amounts": {"standard_balance": "10.00"}, "financial_values": [],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            key = Fernet.generate_key().decode()
+            registry = AmazonSourceRegistry(root / "ops.db", key)
+            source = registry.upsert({"name": "Amazon CA", "enabled": True, "client_id": "a", "client_secret": "b", "refresh_token": "c"})
+            registry.record_connection_test(source["id"], [{
+                "marketplaceDetails": {"marketplaceId": "CA", "marketplaceName": "Amazon.ca"},
+                "totalAmount": {"currencyCode": "CAD", "currencyAmount": 0},
+            }])
+            registry.record_transaction_snapshot(
+                source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED",
+                [{"transactionId": "T1", "transactionStatus": "DEFERRED", "totalAmount": {"currencyCode": "CAD", "currencyAmount": "4.25"}}],
+                datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc),
+            )
+            service = Phase0Service(AppConfig(database_path=root / "ops.db", transaction_visibility_enabled=True))
+            with (
+                patch.dict("os.environ", {"AI_CASHFLOW_MASTER_KEY": key}),
+                patch("ai_cashflow.api.services.AmazonSpApiClient", FakePositionClient),
+            ):
+                result = service.get_amazon_financial_position(source["id"], "CAD")
+
+        self.assertTrue(result["transaction_visibility_enabled"])
+        self.assertEqual(result["transaction_visibility"]["deferred_amount"], "4.25")
+        self.assertIsNone(next(row for row in result["financial_values"] if row["type"] == "UPCOMING_PAYOUT")["amount"] if any(row["type"] == "UPCOMING_PAYOUT" for row in result["financial_values"]) else None)
+
     def test_cashflow_proof_coverage_includes_every_enabled_source_only(self):
         class FakeRegistry:
             def __init__(self, _database_path, _key):

@@ -478,6 +478,9 @@ class AppConfig:
     api_key: str | None = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_API_KEY"
     ))
+    transaction_visibility_enabled: bool = field(default_factory=lambda: os.getenv(
+        "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"})
     max_upload_bytes: int = field(default_factory=lambda: _int_env(
         "AI_CASHFLOW_MAX_UPLOAD_BYTES",
         10 * 1024 * 1024,

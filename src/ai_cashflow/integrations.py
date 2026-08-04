@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import hashlib
 import json
+import logging
+import os
 import re
 import sqlite3
 from typing import Any, Mapping
@@ -24,6 +28,8 @@ AMAZON_SP_API_ENDPOINTS = frozenset(
     }
 )
 DEFAULT_AMAZON_ENDPOINT = "https://sellingpartnerapi-na.amazon.com"
+LOGGER = logging.getLogger(__name__)
+TRANSACTION_STATUSES = ("DEFERRED", "DEFERRED_RELEASED", "RELEASED")
 
 
 def _utc_now() -> str:
@@ -411,6 +417,59 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS amazon_transaction_observations (
+                    source_id TEXT NOT NULL,
+                    marketplace_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    retrieved_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    conflict INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (source_id, marketplace_id, transaction_id, retrieved_at, fingerprint),
+                    FOREIGN KEY (source_id) REFERENCES amazon_sources(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS amazon_transaction_state (
+                    source_id TEXT NOT NULL,
+                    marketplace_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    marketplace_name TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    retrieved_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    conflict INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (source_id, marketplace_id, transaction_id),
+                    FOREIGN KEY (source_id) REFERENCES amazon_sources(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS amazon_transaction_checkpoints (
+                    source_id TEXT NOT NULL,
+                    marketplace_id TEXT NOT NULL,
+                    marketplace_name TEXT NOT NULL DEFAULT '',
+                    currency TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    coverage_start TEXT NOT NULL,
+                    coverage_end TEXT NOT NULL,
+                    retrieved_at TEXT NOT NULL,
+                    pagination_complete INTEGER NOT NULL,
+                    last_error TEXT,
+                    PRIMARY KEY (source_id, marketplace_id, status),
+                    FOREIGN KEY (source_id) REFERENCES amazon_sources(id) ON DELETE CASCADE
+                )
+                """
+            )
 
     def _source_row(self, source_id: str) -> sqlite3.Row:
         with self._connect() as connection:
@@ -606,10 +665,292 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             )
         return self.get_source(source_id)
 
+    @staticmethod
+    def _transaction_fingerprint(payload: Mapping[str, object]) -> tuple[str, str]:
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return serialized, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _money(payload: Mapping[str, object]) -> Decimal:
+        amount = payload.get("currencyAmount")
+        try:
+            return Decimal(str(amount if amount is not None else "0"))
+        except InvalidOperation:
+            return Decimal("0")
+
+    @classmethod
+    def _composition(cls, payload: Mapping[str, object]) -> dict[str, Decimal]:
+        totals: dict[str, Decimal] = {}
+
+        def visit(nodes: object, transaction_type: str) -> None:
+            if not isinstance(nodes, list):
+                return
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                children = node.get("breakdowns")
+                if isinstance(children, list) and children:
+                    visit(children, transaction_type)
+                    continue
+                kind = f"{transaction_type} {node.get('breakdownType', '')}".lower()
+                if "refund" in kind:
+                    bucket = "Refunds"
+                elif "chargeback" in kind:
+                    bucket = "Chargebacks"
+                elif "fba" in kind or "fulfillment" in kind:
+                    bucket = "FBA fees"
+                elif "tax" in kind:
+                    bucket = "Taxes"
+                elif "fee" in kind or "commission" in kind:
+                    bucket = "Amazon fees"
+                elif "adjust" in kind:
+                    bucket = "Adjustments"
+                elif any(word in kind for word in ("principal", "product", "sale", "shipment")):
+                    bucket = "Product sales"
+                else:
+                    bucket = "Other"
+                amount = node.get("breakdownAmount")
+                if isinstance(amount, dict):
+                    totals[bucket] = totals.get(bucket, Decimal("0")) + cls._money(amount)
+
+        transaction_type = str(payload.get("transactionType") or "")
+        visit(payload.get("breakdowns"), transaction_type)
+        for item in payload.get("items", []) if isinstance(payload.get("items"), list) else []:
+            if isinstance(item, dict):
+                visit(item.get("breakdowns"), transaction_type)
+        return totals
+
+    def record_transaction_snapshot(
+        self,
+        source_id: str,
+        marketplace_id: str,
+        marketplace_name: str,
+        currency: str,
+        requested_status: str,
+        transactions: list[dict[str, object]],
+        retrieved_at: datetime,
+        *,
+        coverage_start: datetime | None = None,
+        coverage_end: datetime | None = None,
+        pagination_complete: bool = True,
+    ) -> None:
+        """Atomically append observations and advance deterministic current state."""
+        if requested_status not in TRANSACTION_STATUSES:
+            raise ValueError(f"Unsupported Amazon transaction status: {requested_status}.")
+        retrieved_at = retrieved_at.astimezone(timezone.utc)
+        retrieved_text = retrieved_at.isoformat()
+        start = coverage_start or retrieved_at - timedelta(days=179)
+        end = coverage_end or retrieved_at
+        ranks = {"DEFERRED": 0, "RELEASED": 1, "DEFERRED_RELEASED": 2}
+        observed_ids: set[str] = set()
+        with self._connect() as connection:
+            for payload in transactions:
+                transaction_id = str(payload.get("transactionId") or "").strip()
+                if not transaction_id:
+                    continue
+                observed_ids.add(transaction_id)
+                status = str(payload.get("transactionStatus") or requested_status).upper()
+                total = payload.get("totalAmount")
+                row_currency = str(
+                    (total.get("currencyCode") or currency) if isinstance(total, dict) else currency
+                ).upper()
+                serialized, fingerprint = self._transaction_fingerprint(payload)
+                current = connection.execute(
+                    """SELECT * FROM amazon_transaction_state
+                       WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
+                    (source_id, marketplace_id, transaction_id),
+                ).fetchone()
+                regressed = bool(current and current["status"] in {"RELEASED", "DEFERRED_RELEASED"} and status == "DEFERRED")
+                connection.execute(
+                    """INSERT OR IGNORE INTO amazon_transaction_observations
+                       (source_id, marketplace_id, transaction_id, retrieved_at, status,
+                        currency, payload_json, fingerprint, conflict)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (source_id, marketplace_id, transaction_id, retrieved_text, status,
+                     row_currency, serialized, fingerprint, int(regressed)),
+                )
+                candidate_key = (retrieved_text, ranks.get(status, -1), fingerprint)
+                current_key = (
+                    (current["retrieved_at"], ranks.get(current["status"], -1), current["fingerprint"])
+                    if current else ("", -1, "")
+                )
+                if regressed:
+                    connection.execute(
+                        """UPDATE amazon_transaction_state SET conflict=1
+                           WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
+                        (source_id, marketplace_id, transaction_id),
+                    )
+                    LOGGER.warning(
+                        "amazon_transaction_state_conflict source=%s marketplace=%s transaction=%s current=%s observed=%s",
+                        source_id, marketplace_id, transaction_id[-8:], current["status"], status,
+                    )
+                elif candidate_key > current_key:
+                    connection.execute(
+                        """INSERT INTO amazon_transaction_state
+                           (source_id, marketplace_id, transaction_id, marketplace_name, currency,
+                            status, retrieved_at, payload_json, fingerprint, conflict)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                           ON CONFLICT(source_id, marketplace_id, transaction_id) DO UPDATE SET
+                             marketplace_name=excluded.marketplace_name, currency=excluded.currency,
+                             status=excluded.status, retrieved_at=excluded.retrieved_at,
+                             payload_json=excluded.payload_json, fingerprint=excluded.fingerprint""",
+                        (source_id, marketplace_id, transaction_id, marketplace_name, row_currency,
+                         status, retrieved_text, serialized, fingerprint),
+                    )
+            stale_params: list[object] = [source_id, marketplace_id, requested_status, retrieved_text]
+            stale_sql = (
+                "DELETE FROM amazon_transaction_state WHERE source_id=? AND marketplace_id=? "
+                "AND status=? AND retrieved_at<?"
+            )
+            if observed_ids:
+                stale_sql += f" AND transaction_id NOT IN ({','.join('?' for _ in observed_ids)})"
+                stale_params.extend(sorted(observed_ids))
+            connection.execute(stale_sql, stale_params)
+            connection.execute(
+                """INSERT INTO amazon_transaction_checkpoints
+                   (source_id, marketplace_id, marketplace_name, currency, status, coverage_start, coverage_end,
+                    retrieved_at, pagination_complete, last_error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                   ON CONFLICT(source_id, marketplace_id, status) DO UPDATE SET
+                     marketplace_name=excluded.marketplace_name, currency=excluded.currency,
+                     coverage_start=excluded.coverage_start, coverage_end=excluded.coverage_end,
+                     retrieved_at=excluded.retrieved_at,
+                     pagination_complete=excluded.pagination_complete, last_error=NULL""",
+                (source_id, marketplace_id, marketplace_name, currency, requested_status, start.isoformat(), end.isoformat(),
+                 retrieved_text, int(pagination_complete)),
+            )
+
+    def record_transaction_sync_failure(
+        self, source_id: str, marketplace_id: str, status: str, message: str,
+        *, marketplace_name: str = "", currency: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO amazon_transaction_checkpoints
+                   (source_id, marketplace_id, marketplace_name, currency, status, coverage_start, coverage_end,
+                    retrieved_at, pagination_complete, last_error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                   ON CONFLICT(source_id, marketplace_id, status) DO UPDATE SET
+                     last_error=excluded.last_error""",
+                (source_id, marketplace_id, marketplace_name, currency, status, now, now, now,
+                 (message or "Amazon transaction retrieval failed.")[:300]),
+            )
+
+    def transaction_visibility(
+        self, source_id: str, currency: str | None = None
+    ) -> dict[str, Any]:
+        requested = str(currency or "").upper()
+        where = "source_id=?" + (" AND currency=?" if requested else "")
+        params: tuple[object, ...] = (source_id, requested) if requested else (source_id,)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM amazon_transaction_state WHERE {where}", params
+            ).fetchall()
+            observation_count = connection.execute(
+                f"SELECT COUNT(*) FROM amazon_transaction_observations WHERE {where}", params
+            ).fetchone()[0]
+            checkpoints = connection.execute(
+                "SELECT * FROM amazon_transaction_checkpoints WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
+
+        def summarize(selected: list[sqlite3.Row], selected_currency: str) -> dict[str, Any]:
+            amounts = {status: Decimal("0") for status in TRANSACTION_STATUSES}
+            counts = {status: 0 for status in TRANSACTION_STATUSES}
+            composition: dict[str, Decimal] = {}
+            for row in selected:
+                payload = json.loads(row["payload_json"])
+                status = row["status"]
+                total = payload.get("totalAmount")
+                if status in amounts:
+                    counts[status] += 1
+                    if isinstance(total, dict):
+                        amounts[status] += self._money(total)
+                for bucket, amount in self._composition(payload).items():
+                    composition[bucket] = composition.get(bucket, Decimal("0")) + amount
+            relevant_checkpoints = [row for row in checkpoints if row["currency"] == selected_currency]
+            return {
+                "classification": "AMAZON_TRANSACTION_DERIVED",
+                "currency": selected_currency,
+                "marketplaces": sorted({
+                    row["marketplace_name"] for row in relevant_checkpoints if row["marketplace_name"]
+                }),
+                "count": len(selected),
+                "deferred_count": counts["DEFERRED"],
+                "deferred_amount": str(amounts["DEFERRED"]),
+                "released_count": counts["RELEASED"],
+                "released_amount": str(amounts["RELEASED"]),
+                "deferred_released_count": counts["DEFERRED_RELEASED"],
+                "deferred_released_amount": str(amounts["DEFERRED_RELEASED"]),
+                "conflict_count": sum(int(row["conflict"]) for row in selected),
+                "composition": {key: str(value) for key, value in composition.items() if value},
+                "coverage_start": min((row["coverage_start"] for row in relevant_checkpoints), default=None),
+                "coverage_end": max((row["coverage_end"] for row in relevant_checkpoints), default=None),
+                "retrieved_at": max((row["retrieved_at"] for row in relevant_checkpoints), default=None),
+                "pagination_complete": bool(relevant_checkpoints) and all(row["pagination_complete"] for row in relevant_checkpoints),
+                "partial_failure": any(bool(row["last_error"]) for row in relevant_checkpoints),
+            }
+
+        if requested:
+            result = summarize(rows, requested)
+            result.update({"currency": requested, "observation_count": observation_count})
+            return result
+        currencies = sorted(
+            {row["currency"] for row in rows} |
+            {row["currency"] for row in checkpoints if row["currency"]}
+        )
+        return {
+            "classification": "AMAZON_TRANSACTION_DERIVED",
+            "observation_count": observation_count,
+            "by_currency": {
+                code: summarize([row for row in rows if row["currency"] == code], code)
+                for code in currencies
+            },
+        }
+
+    def transaction_reconciliation_report(self, source_id: str) -> dict[str, Any]:
+        """Internal-only trend evidence; three retrieval snapshots are required."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT retrieved_at, currency, status, payload_json
+                   FROM amazon_transaction_observations
+                   WHERE source_id=? ORDER BY retrieved_at""",
+                (source_id,),
+            ).fetchall()
+        snapshots: dict[str, dict[str, Decimal]] = {}
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            total = payload.get("totalAmount")
+            if not isinstance(total, dict):
+                continue
+            key = f"{row['currency']}:{row['status']}"
+            snapshot = snapshots.setdefault(row["retrieved_at"], {})
+            snapshot[key] = snapshot.get(key, Decimal("0")) + self._money(total)
+        if len(snapshots) < 3:
+            return {
+                "status": "insufficient_history",
+                "snapshot_count": len(snapshots),
+                "required_snapshot_count": 3,
+                "snapshots": [],
+            }
+        return {
+            "status": "ready",
+            "snapshot_count": len(snapshots),
+            "required_snapshot_count": 3,
+            "snapshots": [
+                {
+                    "retrieved_at": retrieved_at,
+                    "totals": {key: str(amount) for key, amount in sorted(totals.items())},
+                }
+                for retrieved_at, totals in snapshots.items()
+            ],
+        }
+
     def sync_source(
         self, source_id: str, client: Any, samples_dir: str | Path
     ) -> dict[str, Any]:
-        self._source_row(source_id)
+        source = self.get_source(source_id)
         started_at = _utc_now()
         reports = client.list_settlement_reports()
         target_dir = Path(samples_dir) / "marketplaces" / "api" / source_id
@@ -641,16 +982,60 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                     ),
                 )
             ingested += 1
+        transaction_errors = 0
+        transaction_rows = 0
+        list_by_status = getattr(client, "list_transactions_by_status", None)
+        visibility_enabled = os.getenv(
+            "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if visibility_enabled and callable(list_by_status):
+            retrieved = datetime.now(timezone.utc)
+            coverage_end = retrieved - timedelta(minutes=2)
+            coverage_start = coverage_end - timedelta(days=179)
+            marketplaces = [
+                row for row in source.get("marketplaces", [])
+                if row.get("is_participating") and str(row.get("name", "")).lower().startswith("amazon")
+            ]
+            for marketplace in marketplaces:
+                marketplace_id = str(marketplace.get("id") or "")
+                if not marketplace_id:
+                    continue
+                for status in TRANSACTION_STATUSES:
+                    try:
+                        rows = list_by_status(marketplace_id, status, coverage_start)
+                        self.record_transaction_snapshot(
+                            source_id, marketplace_id, str(marketplace.get("name") or marketplace_id),
+                            str(marketplace.get("currency") or "").upper(), status, rows, retrieved,
+                            coverage_start=coverage_start, coverage_end=coverage_end,
+                        )
+                        transaction_rows += len(rows)
+                    except Exception as exc:  # each marketplace/status keeps its last good snapshot
+                        transaction_errors += 1
+                        self.record_transaction_sync_failure(
+                            source_id, marketplace_id, status, str(exc),
+                            marketplace_name=str(marketplace.get("name") or marketplace_id),
+                            currency=str(marketplace.get("currency") or "").upper(),
+                        )
+                        LOGGER.warning(
+                            "amazon_transaction_sync_partial source=%s marketplace=%s status=%s error=%s",
+                            source_id, marketplace_id, status, type(exc).__name__,
+                        )
         completed_at = _utc_now()
-        message = f"Ingested {ingested} new settlement report(s)."
+        sync_status = "partial" if transaction_errors else "completed"
+        message = (
+            f"Ingested {ingested} new settlement report(s); stored {transaction_rows} "
+            f"transaction observation(s)."
+        )
+        if transaction_errors:
+            message += f" {transaction_errors} transaction request(s) retained their last successful snapshot."
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO amazon_source_sync_runs
                     (source_id, started_at, completed_at, status, reports_found, reports_ingested, message)
-                VALUES (?, ?, ?, 'completed', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source_id, started_at, completed_at, len(reports), ingested, message),
+                (source_id, started_at, completed_at, sync_status, len(reports), ingested, message),
             )
             connection.execute(
                 """
@@ -661,9 +1046,11 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             )
         return {
             "source_id": source_id,
-            "status": "completed",
+            "status": sync_status,
             "reports_found": len(reports),
             "reports_ingested": ingested,
+            "transaction_observations": transaction_rows,
+            "transaction_errors": transaction_errors,
             "started_at": started_at,
             "completed_at": completed_at,
             "message": message,

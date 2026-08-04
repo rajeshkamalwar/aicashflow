@@ -8,6 +8,36 @@ from ai_cashflow.amazon_sp_api import AmazonSpApiClient, AmazonSpApiConfig
 
 
 class AmazonSpApiClientTests(unittest.TestCase):
+    def test_lists_transaction_status_for_persisted_sync(self):
+        requests = []
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "token"})
+            return httpx.Response(200, json={"payload": {"transactions": [{"transactionId": "T1"}]}})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            rows = AmazonSpApiClient(AmazonSpApiConfig("client", "secret", "refresh"), http=http).list_transactions_by_status(
+                "A2EUQ1WTGCTBG2", "DEFERRED", datetime(2026, 2, 6, tzinfo=timezone.utc)
+            )
+        self.assertEqual(rows, [{"transactionId": "T1"}])
+        self.assertEqual(requests[1].url.params["transactionStatus"], "DEFERRED")
+
+    def test_transaction_status_retries_a_throttled_page(self):
+        attempts = 0
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "token"})
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"})
+            return httpx.Response(200, json={"payload": {"transactions": []}})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            AmazonSpApiClient(AmazonSpApiConfig("client", "secret", "refresh"), http=http).list_transactions_by_status(
+                "A2EUQ1WTGCTBG2", "RELEASED", datetime(2026, 2, 6, tzinfo=timezone.utc)
+            )
+        self.assertEqual(attempts, 2)
+
     @staticmethod
     def _client_for_financial_groups(groups):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -280,13 +310,13 @@ class AmazonSpApiClientTests(unittest.TestCase):
         self.assertEqual(position["source_currency"], "AUD")
         self.assertEqual(position["currency"], "USD")
         self.assertEqual(position["source_amounts"]["standard_balance"], "18720.03")
-        self.assertEqual(position["source_amounts"]["deferred_balance"], "32154.86")
-        self.assertEqual(position["source_amounts"]["total_balance"], "50874.89")
+        self.assertIsNone(position["source_amounts"]["deferred_balance"])
+        self.assertIsNone(position["source_amounts"]["total_balance"])
         self.assertIsNone(position["source_amounts"]["funds_available"])
         self.assertEqual(position["source_amounts"]["recent_payout"], "23535.57")
         self.assertEqual(position["amounts"]["standard_balance"], "13119.58")
-        self.assertEqual(position["amounts"]["deferred_balance"], "22535.13")
-        self.assertEqual(position["amounts"]["total_balance"], "35654.71")
+        self.assertIsNone(position["amounts"]["deferred_balance"])
+        self.assertIsNone(position["amounts"]["total_balance"])
         self.assertIsNone(position["amounts"]["funds_available"])
         self.assertEqual(position["amounts"]["recent_payout"], "16494.46")
         self.assertIsNone(position["amounts"]["reserve_balance"])
@@ -324,8 +354,8 @@ class AmazonSpApiClientTests(unittest.TestCase):
         completed = next(row for row in values if row["type"] == "COMPLETED_PAYOUT")
         self.assertEqual(completed["amount"], "23535.57")
         self.assertEqual(completed["processingStatus"], "Closed")
-        self.assertTrue(any(
-            request.url.params.get("transactionStatus") == "DEFERRED"
+        self.assertFalse(any(
+            request.url.path == "/finances/2024-06-19/transactions"
             for request in requests
         ))
         self.assertFalse(any(
@@ -346,6 +376,14 @@ class AmazonSpApiClientTests(unittest.TestCase):
                         "FinancialEventGroupStart": "2026-08-01T00:00:00Z",
                         "FundTransferDate": "2026-08-05T00:00:00Z",
                         "OriginalTotal": {"CurrencyCode": "CAD", "CurrencyAmount": "88495.71"},
+                    },
+                    {
+                        "FinancialEventGroupId": "CAD-CLOSED-20260731",
+                        "ProcessingStatus": "Closed",
+                        "FinancialEventGroupStart": "2026-07-20T00:00:00Z",
+                        "FundTransferDate": "2026-07-31T00:00:00Z",
+                        "FundTransferStatus": "Succeeded",
+                        "OriginalTotal": {"CurrencyCode": "CAD", "CurrencyAmount": "123025.62"},
                     },
                     {
                         "FinancialEventGroupId": "MXN-OPEN",
@@ -374,6 +412,8 @@ class AmazonSpApiClientTests(unittest.TestCase):
         self.assertEqual(position["totals_by_currency"], {"CAD": "88495.71", "MXN": "1000.00"})
         self.assertEqual(position["amounts"]["current_balance"], "29501.61")
         self.assertEqual(position["expected_payout_forecasts"], [])
+        self.assertEqual(position["recent_completed_payouts"]["CAD"]["amount"], "123025.62")
+        self.assertEqual(position["recent_completed_payouts"]["CAD"]["financial_event_group_id"], "CAD-…0731")
         open_values = [row for row in position["financial_values"] if row["type"] == "OPEN_BALANCE"]
         self.assertEqual(
             [(row["currency"], row["amount"]) for row in open_values],

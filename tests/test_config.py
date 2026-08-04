@@ -8,6 +8,14 @@ from ai_cashflow.config import AppConfig
 
 
 class ConfigTests(unittest.TestCase):
+    def test_transaction_visibility_is_disabled_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(AppConfig().transaction_visibility_enabled)
+
+    def test_transaction_visibility_can_be_enabled_explicitly(self):
+        with patch.dict(os.environ, {"AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "true"}, clear=True):
+            self.assertTrue(AppConfig().transaction_visibility_enabled)
+
     def test_marketplace_ar_configuration_paths_can_live_outside_the_release(self):
         with patch.dict(os.environ, {
             "AI_CASHFLOW_MARKETPLACE_AR_REGISTRY_PATH": "/var/lib/aicashflow/config/marketplace_ar_sources.csv",
