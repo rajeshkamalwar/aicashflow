@@ -8,6 +8,40 @@ from ai_cashflow.amazon_sp_api import AmazonSpApiClient, AmazonSpApiConfig
 
 
 class AmazonSpApiClientTests(unittest.TestCase):
+    @staticmethod
+    def _client_for_financial_groups(groups):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "access-token"})
+            if request.url.path == "/finances/v0/financialEventGroups":
+                return httpx.Response(200, json={"payload": {
+                    "FinancialEventGroupList": groups,
+                }})
+            if request.url.path == "/finances/2024-06-19/transactions":
+                return httpx.Response(200, json={"payload": {"transactions": []}})
+            return httpx.Response(404)
+
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        return AmazonSpApiClient(
+            AmazonSpApiConfig("client", "secret", "refresh"), http=http
+        ), http
+
+    @staticmethod
+    def _group(group_id, status, amount, *, currency="CAD", **fields):
+        return {
+            "FinancialEventGroupId": group_id,
+            "ProcessingStatus": status,
+            "OriginalTotal": {
+                "CurrencyCode": currency,
+                "CurrencyAmount": amount,
+            },
+            "BeginningBalance": {
+                "CurrencyCode": currency,
+                "CurrencyAmount": "0",
+            },
+            **fields,
+        }
+
     def test_lists_released_transactions_for_a_payment_group_with_pagination(self):
         requests = []
 
@@ -353,3 +387,281 @@ class AmazonSpApiClientTests(unittest.TestCase):
             sum(Decimal(row["usd_amount"]) for row in position["balances"]),
             Decimal(position["amounts"]["current_balance"]),
         )
+
+    def test_canonical_selection_is_response_order_independent(self):
+        observations = [
+            self._group(
+                "G1", "Open", "10.00",
+                FinancialEventGroupStart="2026-08-01T00:00:00Z",
+            ),
+            self._group(
+                "G1", "Closed", "12.00",
+                FinancialEventGroupEnd="2026-08-03T00:00:00Z",
+            ),
+        ]
+        now = datetime(2026, 8, 4, tzinfo=timezone.utc)
+        forward, forward_diagnostics = AmazonSpApiClient._normalize_financial_event_groups(
+            observations, now
+        )
+        reverse, reverse_diagnostics = AmazonSpApiClient._normalize_financial_event_groups(
+            list(reversed(observations)), now
+        )
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward_diagnostics, reverse_diagnostics)
+
+    def test_open_followed_by_closed_selects_closed(self):
+        observations = [
+            self._group("G1", "Open", "10", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("G1", "Closed", "10", FinancialEventGroupEnd="2026-08-02T00:00:00Z"),
+        ]
+
+        canonical, _ = AmazonSpApiClient._normalize_financial_event_groups(
+            observations, datetime(2026, 8, 4, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(canonical[0]["ProcessingStatus"], "Closed")
+
+    def test_closed_followed_by_newer_open_selects_open(self):
+        observations = [
+            self._group("G1", "Closed", "8", FundTransferDate="2026-08-02T00:00:00Z"),
+            self._group("G1", "Open", "9", FinancialEventGroupStart="2026-08-03T00:00:00Z"),
+        ]
+
+        canonical, _ = AmazonSpApiClient._normalize_financial_event_groups(
+            observations, datetime(2026, 8, 4, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(canonical[0]["ProcessingStatus"], "Open")
+        self.assertEqual(canonical[0]["OriginalTotal"]["CurrencyAmount"], "9")
+
+    def test_revised_total_uses_newer_observation(self):
+        observations = [
+            self._group("G1", "Open", "10.001", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("G1", "Open", "10.009", FinancialEventGroupStart="2026-08-02T00:00:00Z"),
+        ]
+        client, http = self._client_for_financial_groups(observations)
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["totals_by_currency"], {"CAD": "10.01"})
+
+    def test_revised_transfer_status_uses_stable_progress_tie_breaker(self):
+        observations = [
+            self._group(
+                "G1", "Closed", "10", FundTransferDate="2026-08-03T00:00:00Z",
+                FundTransferStatus="Pending",
+            ),
+            self._group(
+                "G1", "Closed", "10", FundTransferDate="2026-08-03T00:00:00Z",
+                FundTransferStatus="Succeeded",
+            ),
+        ]
+
+        canonical, _ = AmazonSpApiClient._normalize_financial_event_groups(
+            list(reversed(observations)), datetime(2026, 8, 4, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(canonical[0]["FundTransferStatus"], "Succeeded")
+
+    def test_identical_duplicate_observations_collapse_to_one_group(self):
+        observation = self._group(
+            "G1", "Open", "4.20", FinancialEventGroupStart="2026-08-01T00:00:00Z"
+        )
+
+        canonical, diagnostics = AmazonSpApiClient._normalize_financial_event_groups(
+            [observation, dict(observation)],
+            datetime(2026, 8, 4, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(diagnostics[0]["observationCount"], 2)
+
+    def test_pagination_duplicates_do_not_double_count(self):
+        observation = self._group(
+            "G1", "Open", "7.25", FinancialEventGroupStart="2026-08-01T00:00:00Z"
+        )
+        client, http = self._client_for_financial_groups([observation, dict(observation)])
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["group_count"], 1)
+        self.assertEqual(position["totals_by_currency"]["CAD"], "7.25")
+
+    def test_missing_timestamps_use_deterministic_terminal_state_tie_breaker(self):
+        observations = [
+            self._group("G1", "Open", "9.99"),
+            self._group("G1", "Closed", "9.99"),
+        ]
+        now = datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+        forward, _ = AmazonSpApiClient._normalize_financial_event_groups(observations, now)
+        reverse, _ = AmazonSpApiClient._normalize_financial_event_groups(
+            list(reversed(observations)), now
+        )
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward[0]["ProcessingStatus"], "Closed")
+
+    def test_retrieval_timestamp_precedes_status_when_event_times_tie(self):
+        observations = [
+            self._group(
+                "G1", "Closed", "10",
+                FinancialEventGroupStart="2026-08-01T00:00:00Z",
+                retrievalTimestamp="2026-08-03T00:00:00Z",
+            ),
+            self._group(
+                "G1", "Open", "11",
+                FinancialEventGroupStart="2026-08-01T00:00:00Z",
+                retrievalTimestamp="2026-08-04T00:00:00Z",
+            ),
+        ]
+
+        canonical, _ = AmazonSpApiClient._normalize_financial_event_groups(
+            observations, datetime(2026, 8, 5, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(canonical[0]["ProcessingStatus"], "Open")
+        self.assertEqual(canonical[0]["OriginalTotal"]["CurrencyAmount"], "11")
+
+    def test_multiple_open_groups_in_one_currency_are_summed(self):
+        groups = [
+            self._group("CAD-1", "Open", "10.10", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("CAD-2", "Open", "20.20", FinancialEventGroupStart="2026-08-02T00:00:00Z"),
+        ]
+        client, http = self._client_for_financial_groups(groups)
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["totals_by_currency"], {"CAD": "30.30"})
+        self.assertEqual(position["openSettlementGroupCount"], 2)
+
+    def test_selected_currency_settlement_count_excludes_other_currencies(self):
+        groups = [
+            self._group("CAD-1", "Open", "10", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("CAD-2", "Open", "20", FinancialEventGroupStart="2026-08-02T00:00:00Z"),
+            self._group("USD-1", "Open", "30", currency="USD", FinancialEventGroupStart="2026-08-03T00:00:00Z"),
+        ]
+        client, http = self._client_for_financial_groups(groups)
+        try:
+            position = client.get_financial_position(
+                "A2EUQ1WTGCTBG2", Decimal("1"), expected_currency="CAD",
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["openSettlementGroupCount"], 2)
+        self.assertEqual(position["group_count"], 2)
+
+    def test_all_currency_cad_equals_selected_cad(self):
+        groups = [
+            self._group("CAD-1", "Open", "10.10", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("CAD-2", "Open", "20.20", FinancialEventGroupStart="2026-08-02T00:00:00Z"),
+            self._group("USD-1", "Open", "99", currency="USD", FinancialEventGroupStart="2026-08-03T00:00:00Z"),
+        ]
+        all_client, all_http = self._client_for_financial_groups(groups)
+        cad_client, cad_http = self._client_for_financial_groups(groups)
+        try:
+            all_position = all_client.get_current_balances(
+                {"CAD": Decimal("1"), "USD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+            cad_position = cad_client.get_financial_position(
+                "A2EUQ1WTGCTBG2", Decimal("1"), expected_currency="CAD",
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            all_http.close()
+            cad_http.close()
+
+        self.assertEqual(
+            all_position["totals_by_currency"]["CAD"],
+            cad_position["source_amounts"]["standard_balance"],
+        )
+
+    def test_decimal_precision_is_preserved_until_money_formatting(self):
+        groups = [
+            self._group("CAD-1", "Open", "0.105", FinancialEventGroupStart="2026-08-01T00:00:00Z"),
+            self._group("CAD-2", "Open", "0.105", FinancialEventGroupStart="2026-08-02T00:00:00Z"),
+        ]
+        client, http = self._client_for_financial_groups(groups)
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["totals_by_currency"]["CAD"], "0.21")
+
+    def test_empty_financial_event_group_state_is_valid(self):
+        client, http = self._client_for_financial_groups([])
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        self.assertEqual(position["status"], "unavailable")
+        self.assertEqual(position["balances"], [])
+        self.assertEqual(position["totals_by_currency"], {})
+        self.assertEqual(position["openSettlementGroupCount"], 0)
+
+    def test_reserve_and_payout_fields_remain_unavailable(self):
+        group = self._group(
+            "CAD-1", "Open", "50", FinancialEventGroupStart="2026-08-01T00:00:00Z"
+        )
+        client, http = self._client_for_financial_groups([group])
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        protected = {"CURRENT_RESERVE", "RESERVE_ADJUSTED_FUNDS", "UPCOMING_PAYOUT"}
+        self.assertTrue(all(
+            row["amount"] is None
+            for row in position["financial_values"]
+            if row["type"] in protected
+        ))
+
+    def test_open_original_total_never_becomes_upcoming_payout(self):
+        group = self._group(
+            "CAD-1", "Open", "50", FinancialEventGroupStart="2026-08-01T00:00:00Z"
+        )
+        client, http = self._client_for_financial_groups([group])
+        try:
+            position = client.get_current_balances(
+                {"CAD": Decimal("1")},
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            http.close()
+
+        open_balance = next(row for row in position["financial_values"] if row["type"] == "OPEN_BALANCE")
+        upcoming = next(row for row in position["financial_values"] if row["type"] == "UPCOMING_PAYOUT")
+        self.assertEqual(open_balance["amount"], "50.00")
+        self.assertEqual(open_balance["sourceField"], "OriginalTotal")
+        self.assertIsNone(upcoming["amount"])
+        self.assertNotIn("financial_event_group_diagnostics", position)

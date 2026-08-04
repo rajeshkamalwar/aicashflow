@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import gzip
+import json
 from urllib.parse import urlparse
 
 import httpx
@@ -87,6 +88,149 @@ class AmazonSpApiClient:
                 return self._get_current_balances(http, usd_rates, current_time)
         return self._get_current_balances(self.http, usd_rates, current_time)
 
+    @staticmethod
+    def _parse_group_timestamp(value: object) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _group_observation_key(
+        cls, group: dict[str, object], retrieved_at: datetime
+    ) -> tuple[datetime, datetime, int, int, int, str]:
+        event_fields = (
+            "FundTransferDate",
+            "FinancialEventGroupEnd",
+            "FinancialEventGroupStart",
+        )
+        retrieval_fields = (
+            "retrievalTimestamp",
+            "RetrievedAt",
+            "retrievedAt",
+            "_retrieved_at",
+        )
+        observation_retrieval = next(
+            (
+                parsed
+                for field in retrieval_fields
+                if (parsed := cls._parse_group_timestamp(group.get(field))) is not None
+            ),
+            retrieved_at.astimezone(timezone.utc),
+        )
+        event_timestamp = retrieved_at.astimezone(timezone.utc)
+        timestamp_strength = 0
+        for index, field in enumerate(event_fields):
+            parsed = cls._parse_group_timestamp(group.get(field))
+            if parsed is not None:
+                event_timestamp = parsed
+                timestamp_strength = len(event_fields) - index
+                break
+        status_priority = {
+            "open": 1,
+            "failed": 2,
+            "closed": 3,
+        }.get(str(group.get("ProcessingStatus", "")).strip().lower(), 0)
+        transfer_priority = {
+            "pending": 1,
+            "processing": 2,
+            "failed": 3,
+            "cancelled": 3,
+            "succeeded": 4,
+        }.get(str(group.get("FundTransferStatus", "")).strip().lower(), 0)
+        fingerprint = json.dumps(
+            group, sort_keys=True, separators=(",", ":"), default=str
+        )
+        return (
+            event_timestamp,
+            observation_retrieval,
+            timestamp_strength,
+            status_priority,
+            transfer_priority,
+            fingerprint,
+        )
+
+    @staticmethod
+    def _group_currency(group: dict[str, object]) -> str:
+        total = group.get("OriginalTotal")
+        if not isinstance(total, dict):
+            return ""
+        return str(
+            total.get("CurrencyCode") or total.get("currencyCode") or ""
+        ).strip().upper()
+
+    @classmethod
+    def _normalize_financial_event_groups(
+        cls, groups: list[dict[str, object]], retrieved_at: datetime
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        """Return one deterministic current observation per event-group ID."""
+        observations: dict[str, list[dict[str, object]]] = {}
+        for group in groups:
+            group_id = str(group.get("FinancialEventGroupId", "")).strip()
+            if not group_id:
+                raise AmazonSpApiError(
+                    "Amazon returned a financial event group without an event group ID."
+                )
+            observations.setdefault(group_id, []).append(group)
+
+        canonical: list[dict[str, object]] = []
+        diagnostics: list[dict[str, object]] = []
+        retrieval_timestamp = retrieved_at.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        for group_id in sorted(observations):
+            group_observations = observations[group_id]
+            selected = max(
+                group_observations,
+                key=lambda row: cls._group_observation_key(row, retrieved_at),
+            )
+            canonical.append(selected)
+            diagnostics.append({
+                "financialEventGroupId": group_id,
+                "processingStatus": str(selected.get("ProcessingStatus", "")),
+                "fundTransferStatus": selected.get("FundTransferStatus"),
+                "originalTotal": selected.get("OriginalTotal"),
+                "currency": cls._group_currency(selected) or None,
+                "retrievalTimestamp": retrieval_timestamp,
+                "observationCount": len(group_observations),
+            })
+        return canonical, diagnostics
+
+    @classmethod
+    def _settlement_status(
+        cls, groups: list[dict[str, object]]
+    ) -> dict[str, object]:
+        open_groups = []
+        exceptions = []
+        for group in groups:
+            group_id = str(group.get("FinancialEventGroupId", "")).strip()
+            status = str(group.get("ProcessingStatus", "")).strip()
+            if status.lower() == "open":
+                open_groups.append({
+                    "financialEventGroupId": group_id,
+                    "startedAt": group.get("FinancialEventGroupStart"),
+                    "processingStatus": status,
+                    "currency": cls._group_currency(group) or None,
+                })
+            elif status.lower() == "failed":
+                exceptions.append({
+                    "type": "GROUP_PROCESSING_FAILED",
+                    "financialEventGroupId": group_id,
+                    "message": "Amazon reported settlement group processing as failed.",
+                })
+        return {
+            "openSettlementGroupCount": len(open_groups),
+            "openSettlementGroups": open_groups,
+            "settlementExceptionCount": len(exceptions),
+            "settlementExceptions": exceptions,
+            "requiresAttention": bool(exceptions),
+        }
+
     def _get_current_balances(
         self,
         http: httpx.Client,
@@ -98,19 +242,15 @@ class AmazonSpApiClient:
         groups = self._list_financial_event_groups(
             http, token, now - timedelta(days=90)
         )
-        seen: set[str] = set()
+        canonical, _ = self._normalize_financial_event_groups(groups, now)
+        settlement_status = self._settlement_status(canonical)
         balances = []
         totals: dict[str, Decimal] = {}
         total_usd = Decimal("0")
-        for group in groups:
+        for group in canonical:
             if str(group.get("ProcessingStatus", "")).lower() != "open":
                 continue
             group_id = str(group.get("FinancialEventGroupId", "")).strip()
-            if not group_id:
-                raise AmazonSpApiError("Amazon returned an open balance without an event group ID.")
-            if group_id in seen:
-                continue
-            seen.add(group_id)
             amount, currency = self._money(group.get("OriginalTotal"), "open financial event group total")
             rate = usd_rates.get(currency)
             if rate is None or rate <= 0:
@@ -127,23 +267,30 @@ class AmazonSpApiClient:
                 "started_at": group.get("FinancialEventGroupStart"),
                 "processing_status": "Open",
             })
-        if not balances:
-            raise AmazonSpApiError("Amazon did not return a current open financial event group.")
         retrieved_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         financial_values = [
             self._financial_value(
                 value_type="OPEN_BALANCE",
-                amount=Decimal(balance["amount"]),
-                currency=str(balance["currency"]),
+                amount=amount,
+                currency=currency,
                 source_field="OriginalTotal",
                 processing_status="Open",
                 retrieved_at=retrieved_at,
-                effective_at=balance.get("started_at"),
+                effective_at=max(
+                    (
+                        row.get("FinancialEventGroupStart")
+                        for row in canonical
+                        if str(row.get("ProcessingStatus", "")).lower() == "open"
+                        and self._group_currency(row) == currency
+                    ),
+                    default=None,
+                    key=lambda value: str(value or ""),
+                ),
                 is_authoritative=True,
                 authoritative_for="AMAZON_REPORTED_OPEN_BALANCE",
-                calculation_method="DIRECT_SP_API_FIELD",
+                calculation_method="SUM_CANONICAL_OPEN_GROUP_TOTALS",
             )
-            for balance in balances
+            for currency, amount in sorted(totals.items())
         ]
         unavailable_reason = (
             "Amazon SP-API has not supplied an authoritative current reserve, "
@@ -169,17 +316,20 @@ class AmazonSpApiClient:
                     availability_reason=unavailable_reason,
                 ))
         return {
-            "status": "ready",
+            "status": "ready" if balances else "unavailable",
             "mode": "amazon_open_balances",
             "currency": "USD",
             "as_of": retrieved_at,
             "group_count": len(balances),
+            **settlement_status,
             "balances": balances,
             "totals_by_currency": {
                 currency: self._format_money(amount)
                 for currency, amount in sorted(totals.items())
             },
-            "amounts": {"current_balance": self._format_money(total_usd)},
+            "amounts": {
+                "current_balance": self._format_money(total_usd) if balances else None
+            },
             "expected_payout_forecasts": [],
             "financial_values": financial_values,
             "validation": {
@@ -189,7 +339,7 @@ class AmazonSpApiClient:
             },
             "api_data_validation": {
                 "status": "passed",
-                "records_parsed": len(balances),
+                "records_parsed": len(canonical),
                 "deduplicated_by": "FinancialEventGroupId",
             },
         }
@@ -266,15 +416,25 @@ class AmazonSpApiClient:
             token,
             now - timedelta(days=90),
         )
+        canonical, _ = self._normalize_financial_event_groups(groups, now)
+        open_candidates = [
+            row for row in canonical
+            if str(row.get("ProcessingStatus", "")).strip().lower() == "open"
+        ]
+        scope_currency = expected_currency
+        if not scope_currency and open_candidates:
+            scope_currency = self._group_currency(max(
+                open_candidates,
+                key=lambda row: self._group_observation_key(row, now),
+            ))
+        scoped_groups = [
+            row for row in canonical
+            if not scope_currency or self._group_currency(row) == scope_currency
+        ]
+        settlement_status = self._settlement_status(scoped_groups)
         open_groups = [
-            row for row in groups
-            if str(row.get("ProcessingStatus", "")).lower() == "open"
-            and (
-                not expected_currency
-                or self._money(
-                    row.get("OriginalTotal"), "open financial event group total"
-                )[1] == expected_currency
-            )
+            row for row in scoped_groups
+            if str(row.get("ProcessingStatus", "")).strip().lower() == "open"
         ]
         if not open_groups:
             raise AmazonSpApiError(
@@ -283,33 +443,30 @@ class AmazonSpApiClient:
             )
         open_group = max(
             open_groups,
-            key=lambda row: str(row.get("FinancialEventGroupStart", "")),
+            key=lambda row: self._group_observation_key(row, now),
         )
         closed_groups = [
-            row for row in groups
-            if str(row.get("ProcessingStatus", "")).lower() == "closed"
-            and (
-                not expected_currency
-                or self._money(
-                    row.get("OriginalTotal"), "closed financial event group total"
-                )[1] == expected_currency
-            )
+            row for row in scoped_groups
+            if str(row.get("ProcessingStatus", "")).strip().lower() == "closed"
         ]
         latest_closed = max(
             closed_groups,
-            key=lambda row: str(
-                row.get("FundTransferDate")
-                or row.get("FinancialEventGroupEnd")
-                or row.get("FinancialEventGroupStart")
-                or ""
-            ),
+            key=lambda row: self._group_observation_key(row, now),
             default=None,
         )
 
-        standard_balance, source_currency = self._money(
-            open_group.get("OriginalTotal"),
-            "open financial event group total",
-        )
+        standard_balance = Decimal("0")
+        source_currency = scope_currency or ""
+        for current_open_group in open_groups:
+            amount, currency = self._money(
+                current_open_group.get("OriginalTotal"),
+                "open financial event group total",
+            )
+            if source_currency:
+                self._require_currency(source_currency, currency)
+            else:
+                source_currency = currency
+            standard_balance += amount
         beginning_balance, beginning_currency = self._money(
             open_group.get("BeginningBalance"),
             "open financial event group beginning balance",
@@ -370,7 +527,7 @@ class AmazonSpApiClient:
                 effective_at=period_start,
                 is_authoritative=True,
                 authoritative_for="AMAZON_REPORTED_OPEN_BALANCE",
-                calculation_method="DIRECT_SP_API_FIELD",
+                calculation_method="SUM_CANONICAL_OPEN_GROUP_TOTALS",
             ),
             self._financial_value(
                 value_type="BEGINNING_BALANCE",
@@ -456,6 +613,8 @@ class AmazonSpApiClient:
             "recent_payout_date": recent_payout_date,
             "recent_payout_status": recent_payout_status,
             "deferred_transaction_count": len(deferred_transactions),
+            "group_count": settlement_status["openSettlementGroupCount"],
+            **settlement_status,
             "funds_available_status": "unavailable",
             "funds_available_note": (
                 "Amazon SP-API does not provide the current account-level reserve."
@@ -484,9 +643,12 @@ class AmazonSpApiClient:
                 },
             },
             "financial_values": financial_values,
+            "totals_by_currency": {
+                source_currency: self._format_money(standard_balance)
+            },
             "api_data_validation": {
                 "status": "passed",
-                "records_parsed": len(deferred_transactions) + 1,
+                "records_parsed": len(deferred_transactions) + len(scoped_groups),
                 "deduplicated_by": "transactionId and FinancialEventGroupId",
             },
         }
