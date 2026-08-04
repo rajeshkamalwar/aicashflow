@@ -595,6 +595,36 @@ class AmazonSpApiClientTests(unittest.TestCase):
             cad_position["source_amounts"]["standard_balance"],
         )
 
+    def test_all_currency_subtotals_equal_each_selected_currency(self):
+        groups = [
+            self._group(f"{currency}-1", "Open", amount, currency=currency, FinancialEventGroupStart="2026-08-01T00:00:00Z")
+            for currency, amount in (("CAD", "10.10"), ("BRL", "20.20"), ("MXN", "30.30"), ("USD", "40.40"))
+        ]
+        rates = {currency: Decimal("1") for currency in ("CAD", "BRL", "MXN", "USD")}
+        all_client, all_http = self._client_for_financial_groups(groups)
+        try:
+            all_position = all_client.get_current_balances(
+                rates,
+                now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+        finally:
+            all_http.close()
+
+        for currency in rates:
+            client, http = self._client_for_financial_groups(groups)
+            try:
+                selected = client.get_financial_position(
+                    "A2EUQ1WTGCTBG2", Decimal("1"), expected_currency=currency,
+                    now=datetime(2026, 8, 4, tzinfo=timezone.utc),
+                )
+            finally:
+                http.close()
+            with self.subTest(currency=currency):
+                self.assertEqual(
+                    all_position["totals_by_currency"][currency],
+                    selected["source_amounts"]["standard_balance"],
+                )
+
     def test_decimal_precision_is_preserved_until_money_formatting(self):
         groups = [
             self._group("CAD-1", "Open", "0.105", FinancialEventGroupStart="2026-08-01T00:00:00Z"),

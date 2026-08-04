@@ -55,6 +55,8 @@ const state = {
 let _pollInterval = null;
 const POLL_INTERVAL_MS = 30_000;
 let _isBackgroundSyncing = false;
+let _selectedSourceSyncing = false;
+const _financialPositionRequests = new Map();
 
 function hasApiSources() {
   return (state.amazonSources || []).some((source) => source.enabled);
@@ -334,25 +336,33 @@ async function syncSelectedSource() {
   const sourceId = state.filters.sourceId;
   if (!sourceId) return;
   const button = document.getElementById("sync-selected-source");
+  _selectedSourceSyncing = true;
   button.disabled = true;
   button.textContent = "Syncing source…";
   try {
     await fetchJson(`/admin/integrations/amazon/sources/${encodeURIComponent(sourceId)}/sync`, { method: "POST" });
-    await loadData();
+    await loadAmazonFinancialPosition(sourceId);
+    render();
     showLiveToast("Source sync completed with current Amazon data.");
+    loadData({ background: true }).catch((error) => showDashboardError("Background refresh", error));
   } catch (error) {
     showLiveToast(error.message || "Source sync failed.");
+    showDashboardError("Source synchronization", error);
   } finally {
-    button.disabled = false;
+    _selectedSourceSyncing = false;
+    const source = (state.amazonSources || []).find((candidate) => candidate.id === sourceId);
+    button.disabled = Boolean(source && !source.credentials?.refresh_token_configured);
     button.textContent = "Sync selected source";
   }
 }
 
 async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
   if (!sourceId) return null;
+  const requestId = (_financialPositionRequests.get(sourceId) || 0) + 1;
+  _financialPositionRequests.set(sourceId, requestId);
+  const currency = sourceId === state.filters.sourceId ? state.filters.currency : "";
   let position;
   try {
-    const currency = sourceId === state.filters.sourceId ? state.filters.currency : "";
     position = await fetchJson(
       `/phase0/amazon/financial-position?source_id=${encodeURIComponent(sourceId)}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
     );
@@ -363,8 +373,10 @@ async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
       message: error.message,
     };
   }
+  if (_financialPositionRequests.get(sourceId) !== requestId) return null;
+  const isCurrentSelection = sourceId === state.filters.sourceId && currency === state.filters.currency;
   state.amazonFinancialPositions[sourceId] = position;
-  if (sourceId === state.filters.sourceId) state.amazonFinancialPosition = position;
+  if (isCurrentSelection) state.amazonFinancialPosition = position;
   return position;
 }
 
@@ -413,27 +425,27 @@ async function loadData(options = {}) {
     state.tenant = tenant;
     state.summary = summary;
     state.exceptions = exceptions;
-    state.dataQuality = quality;
-    state.matched = matched;
-    state.unmatchedExpected = expected;
-    state.unmatchedReceipts = receipts;
-    state.uploads = uploads;
-    state.runs = runs;
-    state.marketplaceActivity = marketplaceActivity;
+    state.dataQuality = Array.isArray(quality) ? quality : [];
+    state.matched = Array.isArray(matched) ? matched : [];
+    state.unmatchedExpected = Array.isArray(expected) ? expected : [];
+    state.unmatchedReceipts = Array.isArray(receipts) ? receipts : [];
+    state.uploads = Array.isArray(uploads) ? uploads : [];
+    state.runs = Array.isArray(runs) ? runs : [];
+    state.marketplaceActivity = Array.isArray(marketplaceActivity) ? marketplaceActivity : [];
     state.marketplaceAr = marketplaceAr;
-    state.sourceEvidence = sourceEvidence;
+    state.sourceEvidence = Array.isArray(sourceEvidence) ? sourceEvidence : [];
     state.inputReadiness = inputReadiness;
     state.calculationAudit = calculationAudit;
     state.cashflowProof = cashflowProof;
     state.apiStatus = apiStatus;
-    state.amazonSources = amazonSources;
-    if (state.filters.sourceId && !amazonSources?.some((source) => source.id === state.filters.sourceId)) {
+    state.amazonSources = Array.isArray(amazonSources) ? amazonSources : [];
+    if (state.filters.sourceId && !state.amazonSources.some((source) => source.id === state.filters.sourceId)) {
       state.filters.sourceId = "";
       persistScopeFilters();
     }
-    if (amazonSources?.length) {
-      if (!amazonSources.some((source) => source.id === state.selectedAmazonSourceId)) {
-        state.selectedAmazonSourceId = amazonSources[0].id;
+    if (state.amazonSources.length) {
+      if (!state.amazonSources.some((source) => source.id === state.selectedAmazonSourceId)) {
+        state.selectedAmazonSourceId = state.amazonSources[0].id;
       }
       if (session.is_admin) await loadSelectedAmazonSource();
     } else {
@@ -442,7 +454,7 @@ async function loadData(options = {}) {
     }
     await loadAmazonFinancialPositions();
     state.sellerStatement = sellerStatement?.status === "loaded" ? sellerStatement : null;
-    const latestSourceSync = (amazonSources || [])
+    const latestSourceSync = state.amazonSources
       .map((source) => source.last_sync_at)
       .filter(Boolean)
       .sort()
@@ -540,12 +552,13 @@ function render() {
   if (!state.summary || !tenant) return;
 
   document.title = tenant.product_name;
-  document.documentElement.style.setProperty("--teal", tenant.brand.primary_color);
-  setText("brand-mark", tenant.brand.logo_text);
+  document.documentElement.style.setProperty("--teal", tenant.brand?.primary_color || "#0f766e");
+  setText("brand-mark", tenant.brand?.logo_text || "CC");
   setText("product-name", tenant.product_name);
   setText("tenant-name", tenant.tenant_name);
 
-  renderScopeControls();
+  document.getElementById("dashboard-error")?.remove();
+  renderSafely("Dashboard filters", renderScopeControls);
   const expected = scopedRows(state.unmatchedExpected);
   const totalExceptions = expected.length;
 
@@ -558,22 +571,42 @@ function render() {
   setText("action-pending-count", expected.length);
   setText("quality-count", state.dataQuality.length);
   setText("runs-count", state.runs.length);
-  setText("settings-currency-count", tenant.currencies.length);
+  setText("settings-currency-count", Array.isArray(tenant.currencies) ? tenant.currencies.length : 0);
   setText("settings-source-count", state.amazonSources?.length || 0);
 
-  renderTreasuryOverview();
-  renderOverviewPanels();
-  renderMarketplaceAr();
-  renderSettlementCards("unmatched-expected-table", expected, "pending");
-  renderQualityList("quality-list", state.dataQuality);
-  renderActionCards("exceptions-table", expected, []);
-  renderRuns();
+  renderSafely("Financial cards", renderTreasuryOverview);
+  renderSafely("Overview panels", renderOverviewPanels);
+  renderSafely("Marketplace AR", renderMarketplaceAr);
+  renderSafely("Settlement activity", () => renderSettlementCards("unmatched-expected-table", expected, "pending"));
+  renderSafely("Data quality", () => renderQualityList("quality-list", state.dataQuality));
+  renderSafely("Exceptions", () => renderActionCards("exceptions-table", expected, []));
+  renderSafely("Refresh history", renderRuns);
   // Keep background refreshes from wiping in-progress edits.
   if (!document.getElementById("admin")?.classList.contains("active")) {
-    renderSettings();
+    renderSafely("Settings", renderSettings);
   }
   if (!document.getElementById("sources")?.classList.contains("active")) {
-    renderAmazonIntegration();
+    renderSafely("Amazon sources", renderAmazonIntegration);
+  }
+}
+
+function showDashboardError(section, error) {
+  console.error(`${section} failed`, error);
+  let notice = document.getElementById("dashboard-error");
+  if (!notice) {
+    notice = document.createElement("section");
+    notice.id = "dashboard-error";
+    notice.className = "data-confidence-banner blocked";
+    document.getElementById("global-scope-bar")?.after(notice);
+  }
+  notice.innerHTML = `<strong>${escapeHtml(section)} unavailable.</strong><span>The remaining dashboard is still available. Try again or contact support if the problem continues.</span>`;
+}
+
+function renderSafely(section, callback) {
+  try {
+    callback();
+  } catch (error) {
+    showDashboardError(section, error);
   }
 }
 
@@ -915,10 +948,11 @@ function renderScopeControls() {
   const position = state.amazonFinancialPosition?.source_id === state.filters.sourceId
     ? state.amazonFinancialPosition
     : null;
+  const marketplaces = Array.isArray(selected?.marketplaces) ? selected.marketplaces : [];
   const currencies = [...new Set([
     ...currencyRows.map((row) => row.currency),
-    ...(selected?.marketplaces || []).map((row) => row.currency),
-    ...(position?.available_currencies || []),
+    ...marketplaces.map((row) => row.currency),
+    ...(Array.isArray(position?.available_currencies) ? position.available_currencies : []),
     position?.currency,
     position?.source_currency,
   ].filter(Boolean))].sort();
@@ -932,7 +966,7 @@ function renderScopeControls() {
   setText("scope-label", selected ? `Source scope · ${selected.name}` : "Group treasury · all sources");
   const syncButton = document.getElementById("sync-selected-source");
   syncButton.hidden = !selected;
-  syncButton.disabled = Boolean(selected && !selected.credentials?.refresh_token_configured);
+  syncButton.disabled = _selectedSourceSyncing || Boolean(selected && !selected.credentials?.refresh_token_configured);
 
   const scopedSources = filteredSources();
   const synced = scopedSources.filter((source) => source.last_sync_at);
@@ -968,7 +1002,8 @@ function formatPositionAmount(currency, value) {
 }
 
 function financialValues(position, type) {
-  return (position?.financial_values || []).filter((value) => value.type === type);
+  const values = Array.isArray(position?.financial_values) ? position.financial_values : [];
+  return values.filter((value) => value && value.type === type);
 }
 
 function unavailableFinancialValue(position, type, fallback) {
@@ -992,7 +1027,8 @@ function sourceStatusHtml(position) {
     not_verified: "Not Verified",
     unavailable: "Unavailable",
   };
-  return Object.values(position?.source_status || {}).map((item) => `
+  const status = position?.source_status && typeof position.source_status === "object" ? position.source_status : {};
+  return Object.values(status).filter((item) => item && typeof item === "object").map((item) => `
     <div class="source-status-item">
       <span>${escapeHtml(item.label || "Status")}</span>
       <strong class="status-${escapeAttribute(item.status || "unknown")}">${escapeHtml(labels[item.status] || item.status || "Unknown")}</strong>
@@ -1038,7 +1074,7 @@ function renderTreasuryOverview() {
     fxEl.innerHTML = `
       <span>Estimated USD Equivalent</span>
       <strong>${fx.amount === null || fx.amount === undefined ? "Unavailable" : `USD ${escapeHtml(formatMoney(moneyNumber(fx.amount)))}`}</strong>
-      <small>FX source: ${escapeHtml(fx.fx_source || "Unavailable")} · Rate date: ${escapeHtml(fx.fx_rate_as_of || "Unavailable")} · Currencies: ${escapeHtml((fx.currencies_included || []).join(", ") || "Unavailable")} · Status: ${escapeHtml(fx.status || "unknown")}</small>
+      <small>FX source: ${escapeHtml(fx.fx_source || "Unavailable")} · Rate date: ${escapeHtml(fx.fx_rate_as_of || "Unavailable")} · Currencies: ${escapeHtml((Array.isArray(fx.currencies_included) ? fx.currencies_included : []).join(", ") || "Unavailable")} · Status: ${escapeHtml(fx.status || "unknown")}</small>
       ${fx.availability_reason ? `<em>${escapeHtml(fx.availability_reason)}</em>` : ""}
       <small>${escapeHtml(fx.disclaimer || "Converted value is an estimate for reporting purposes. Native-currency balances remain authoritative.")}</small>`;
 
@@ -1054,7 +1090,7 @@ function renderTreasuryOverview() {
   }
 
   setText("overview-confirmed-cash", "Unavailable");
-  setText("overview-confirmed-note", "Select one Amazon source to load its current balance.");
+  setText("overview-confirmed-note", position?.message || "Select one Amazon source to load its current balance.");
   document.getElementById("overview-open-balance-meta").innerHTML = "";
   document.getElementById("overview-fx-estimate").innerHTML = "";
   document.getElementById("overview-source-status").innerHTML = "";

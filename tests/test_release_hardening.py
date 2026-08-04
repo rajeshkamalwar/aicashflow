@@ -24,6 +24,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseHardeningTests(unittest.TestCase):
+    def test_dashboard_frontend_is_resilient_to_currency_and_api_failures(self):
+        javascript = (ROOT / "src/ai_cashflow/web/app.js").read_text(encoding="utf-8")
+
+        checks = {
+            "all currencies": 'currency ? `&currency=${encodeURIComponent(currency)}` : ""',
+            "CAD": "currency === state.filters.currency",
+            "BRL": "available_currencies",
+            "MXN": "available_currencies",
+            "USD": "available_currencies",
+            "missing optional fields": "Array.isArray(position?.financial_values)",
+            "null reserve funds payout": "candidate.amount !== null",
+            "empty settlement groups": "Array.isArray(expected) ? expected : []",
+            "API 401": "showAccessMessage(401)",
+            "API 403": "showAccessMessage(403)",
+            "API 500": "position?.message ||",
+            "sync success": "Source sync completed with current Amazon data.",
+            "sync failure": "Source synchronization",
+            "sync reset": "button.textContent = \"Sync selected source\";",
+            "isolated renderer failure": 'renderSafely("Financial cards", renderTreasuryOverview)',
+            "stale response protection": "_financialPositionRequests.get(sourceId) !== requestId",
+        }
+        for scenario, expected in checks.items():
+            with self.subTest(scenario=scenario):
+                self.assertIn(expected, javascript)
+
+        self.assertLess(
+            javascript.index('button.textContent = "Sync selected source";'),
+            javascript.index("async function loadAmazonFinancialPosition"),
+        )
+        self.assertIn("finally {", javascript[javascript.index("async function syncSelectedSource"):javascript.index("async function loadAmazonFinancialPosition")])
+        self.assertIn("Build __RELEASE_ID__", (ROOT / "src/ai_cashflow/web/app.html").read_text(encoding="utf-8"))
+
     def test_release_id_versions_assets_and_html_is_not_cached(self):
         app = create_test_app()
         client = test_client(app, authenticated=False)
