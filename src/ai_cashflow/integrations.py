@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import time
 import zlib
@@ -20,6 +21,7 @@ from uuid import uuid4
 from cryptography.fernet import Fernet, InvalidToken
 
 from .amazon_sp_api import AmazonSpApiConfig
+from .amazon_transaction_state import transaction_timestamp, transition_decision
 
 
 AMAZON_SP_API_ENDPOINTS = frozenset(
@@ -32,7 +34,6 @@ AMAZON_SP_API_ENDPOINTS = frozenset(
 DEFAULT_AMAZON_ENDPOINT = "https://sellingpartnerapi-na.amazon.com"
 LOGGER = logging.getLogger(__name__)
 TRANSACTION_STATUSES = ("DEFERRED", "DEFERRED_RELEASED", "RELEASED")
-TRANSACTION_STATUS_RANK = {"DEFERRED": 0, "RELEASED": 1, "DEFERRED_RELEASED": 2}
 
 
 def _utc_now() -> str:
@@ -475,7 +476,16 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             )
             for table, column, definition in (
                 ("amazon_transaction_observations", "run_id", "TEXT NOT NULL DEFAULT 'legacy'"),
+                ("amazon_transaction_observations", "observation_at", "TEXT"),
+                ("amazon_transaction_observations", "previous_status", "TEXT"),
+                ("amazon_transaction_observations", "conflict_category", "TEXT"),
+                ("amazon_transaction_observations", "included_in_totals", "INTEGER NOT NULL DEFAULT 1"),
+                ("amazon_transaction_observations", "resolution_reason", "TEXT"),
                 ("amazon_transaction_state", "active_run_id", "TEXT NOT NULL DEFAULT 'legacy'"),
+                ("amazon_transaction_state", "observation_at", "TEXT"),
+                ("amazon_transaction_state", "conflict_category", "TEXT"),
+                ("amazon_transaction_state", "included_in_totals", "INTEGER NOT NULL DEFAULT 1"),
+                ("amazon_transaction_state", "resolution_reason", "TEXT"),
                 ("amazon_transaction_checkpoints", "successful_run_id", "TEXT NOT NULL DEFAULT 'legacy'"),
             ):
                 columns = {
@@ -495,6 +505,11 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             connection.execute(
                 """CREATE INDEX IF NOT EXISTS amazon_transaction_observation_retrieved_idx
                    ON amazon_transaction_observations (retrieved_at)"""
+            )
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS amazon_transaction_observation_status_event_idx
+                   ON amazon_transaction_observations
+                   (source_id, conflict_category, retrieved_at)"""
             )
             connection.execute(
                 """
@@ -539,6 +554,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                     status TEXT NOT NULL,
                     last_error TEXT,
                     rate_limit TEXT,
+                    throttled_attempts INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -551,6 +567,13 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    ON amazon_transaction_runs
                    (source_id, marketplace_id, transaction_status, kind, status, updated_at)"""
             )
+            run_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(amazon_transaction_runs)")
+            }
+            if "throttled_attempts" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE amazon_transaction_runs ADD COLUMN throttled_attempts INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS amazon_transaction_staging (
@@ -593,6 +616,10 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                     current_state_updated INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     last_error TEXT,
+                    starting_database_bytes INTEGER NOT NULL DEFAULT 0,
+                    status_conflicts INTEGER NOT NULL DEFAULT 0,
+                    consecutive_throttles INTEGER NOT NULL DEFAULT 0,
+                    pause_reason TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -605,6 +632,20 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    ON amazon_transaction_backfill_jobs
                    (source_id, marketplace_id, transaction_status, status, updated_at)"""
             )
+            backfill_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(amazon_transaction_backfill_jobs)")
+            }
+            for column, definition in (
+                ("starting_database_bytes", "INTEGER NOT NULL DEFAULT 0"),
+                ("status_conflicts", "INTEGER NOT NULL DEFAULT 0"),
+                ("consecutive_throttles", "INTEGER NOT NULL DEFAULT 0"),
+                ("pause_reason", "TEXT"),
+            ):
+                if column not in backfill_columns:
+                    connection.execute(
+                        f"ALTER TABLE amazon_transaction_backfill_jobs ADD COLUMN {column} {definition}"
+                    )
 
     def _source_row(self, source_id: str) -> sqlite3.Row:
         with self._connect() as connection:
@@ -921,6 +962,13 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
     def _public_collection_row(row: sqlite3.Row) -> dict[str, Any]:
         return {key: row[key] for key in row.keys()}
 
+    def _public_backfill_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        result = self._public_collection_row(row)
+        result["database_growth_bytes"] = max(
+            0, self.database_path.stat().st_size - int(row["starting_database_bytes"] or 0)
+        )
+        return result
+
     def _create_collection_run(
         self,
         *,
@@ -953,7 +1001,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
 
     def _stage_transaction_page(
         self, run_id: str, transactions: list[dict[str, object]], next_token: str | None,
-        rate_limit: str | None,
+        rate_limit: str | None, throttled_attempts: int = 0,
     ) -> dict[str, int]:
         inserted = 0
         duplicates = 0
@@ -989,8 +1037,9 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             connection.execute(
                 """UPDATE amazon_transaction_runs SET next_token=?, pages_completed=pages_completed+1,
                    transactions_received=transactions_received+?, duplicates_ignored=duplicates_ignored+?,
-                   rate_limit=?, updated_at=? WHERE run_id=?""",
-                (next_token, len(transactions), duplicates, rate_limit, now, run_id),
+                   rate_limit=?, throttled_attempts=throttled_attempts+?, updated_at=? WHERE run_id=?""",
+                (next_token, len(transactions), duplicates, rate_limit,
+                 max(0, int(throttled_attempts)), now, run_id),
             )
         return {"staged": inserted, "duplicates": duplicates}
 
@@ -1022,47 +1071,56 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                        WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
                     (run["source_id"], run["marketplace_id"], row["transaction_id"]),
                 ).fetchone()
-                regressed = bool(
-                    current
-                    and TRANSACTION_STATUS_RANK.get(current["status"], -1)
-                    > TRANSACTION_STATUS_RANK.get(row["status"], -1)
+                if current is not None and current["fingerprint"] == row["fingerprint"]:
+                    continue
+                normalized = json.loads(row["normalized_json"])
+                observed_at = str(normalized.get("postedDate") or "") or None
+                decision = transition_decision(
+                    current, row["status"], observed_at, now, row["fingerprint"]
                 )
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO amazon_transaction_observations
                        (source_id, marketplace_id, transaction_id, retrieved_at, status, currency,
-                        payload_json, fingerprint, conflict, run_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        payload_json, fingerprint, conflict, run_id, observation_at, previous_status,
+                        conflict_category, included_in_totals, resolution_reason)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (run["source_id"], run["marketplace_id"], row["transaction_id"], now,
                      row["status"], row["currency"], row["normalized_json"], row["fingerprint"],
-                     int(regressed), run_id),
+                     int(decision["conflict"]), run_id, observed_at,
+                     current["status"] if current else None, decision["category"],
+                     int(decision["included"]), decision["reason"]),
                 )
                 inserted += cursor.rowcount
-                if regressed:
+                if decision["conflict"]:
                     conflicts += 1
                     connection.execute(
-                        """UPDATE amazon_transaction_state SET conflict=1
+                        """UPDATE amazon_transaction_state SET conflict=1,
+                           conflict_category=?, included_in_totals=0, resolution_reason=?
                            WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
-                        (run["source_id"], run["marketplace_id"], row["transaction_id"]),
+                        (decision["category"], decision["reason"], run["source_id"],
+                         run["marketplace_id"], row["transaction_id"]),
                     )
-                    continue
-                if current is None or (
-                    TRANSACTION_STATUS_RANK.get(row["status"], -1), row["fingerprint"]
-                ) >= (
-                    TRANSACTION_STATUS_RANK.get(current["status"], -1), current["fingerprint"]
-                ):
+                if decision["promote"]:
                     connection.execute(
                         """INSERT INTO amazon_transaction_state
                            (source_id, marketplace_id, transaction_id, marketplace_name, currency,
-                            status, retrieved_at, payload_json, fingerprint, conflict, active_run_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                            status, retrieved_at, payload_json, fingerprint, conflict, active_run_id,
+                            observation_at, conflict_category, included_in_totals, resolution_reason)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(source_id, marketplace_id, transaction_id) DO UPDATE SET
                              marketplace_name=excluded.marketplace_name, currency=excluded.currency,
                              status=excluded.status, retrieved_at=excluded.retrieved_at,
                              payload_json=excluded.payload_json, fingerprint=excluded.fingerprint,
-                             conflict=0, active_run_id=excluded.active_run_id""",
+                             conflict=excluded.conflict, active_run_id=excluded.active_run_id,
+                             observation_at=excluded.observation_at,
+                             conflict_category=excluded.conflict_category,
+                             included_in_totals=excluded.included_in_totals,
+                             resolution_reason=excluded.resolution_reason""",
                         (run["source_id"], run["marketplace_id"], row["transaction_id"],
                          run["marketplace_name"], row["currency"], row["status"], now,
-                         row["normalized_json"], row["fingerprint"], run_id),
+                         row["normalized_json"], row["fingerprint"], int(decision["conflict"]),
+                         run_id, observed_at, decision["category"],
+                         int(decision["included"]), decision["reason"]),
                     )
                     updated += 1
             if run["kind"] == "incremental":
@@ -1109,11 +1167,11 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 """INSERT INTO amazon_transaction_backfill_jobs
                    (job_id, source_id, marketplace_id, marketplace_name, currency, transaction_status,
                     overall_start, overall_end, current_slice_start, current_slice_end, slice_hours,
-                    status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+                    status, starting_database_bytes, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
                 (job_id, source_id, marketplace_id, marketplace_name, currency.upper(), transaction_status,
                  start.isoformat(), end.isoformat(), start.isoformat(), slice_end.isoformat(),
-                 slice_hours, now, now),
+                 slice_hours, self.database_path.stat().st_size, now, now),
             )
         return self.get_transaction_backfill(job_id)
 
@@ -1124,7 +1182,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             ).fetchone()
         if row is None:
             raise ValueError("Transaction backfill job not found.")
-        return self._public_collection_row(row)
+        return self._public_backfill_row(row)
 
     def list_transaction_backfills(self, source_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -1132,12 +1190,14 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "SELECT * FROM amazon_transaction_backfill_jobs WHERE source_id=? ORDER BY created_at DESC",
                 (source_id,),
             ).fetchall()
-        return [self._public_collection_row(row) for row in rows]
+        return [self._public_backfill_row(row) for row in rows]
 
     def pause_transaction_backfill(self, job_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE amazon_transaction_backfill_jobs SET status='paused', updated_at=? WHERE job_id=? AND status IN ('running','failed')",
+                """UPDATE amazon_transaction_backfill_jobs
+                   SET status='paused', pause_reason='MANUAL', updated_at=?
+                   WHERE job_id=? AND status IN ('running','failed')""",
                 (_utc_now(), job_id),
             )
         return self.get_transaction_backfill(job_id)
@@ -1145,7 +1205,9 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
     def resume_transaction_backfill(self, job_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE amazon_transaction_backfill_jobs SET status='running', last_error=NULL, updated_at=? WHERE job_id=? AND status IN ('paused','failed')",
+                """UPDATE amazon_transaction_backfill_jobs SET status='running', last_error=NULL,
+                   pause_reason=NULL, consecutive_throttles=0, updated_at=?
+                   WHERE job_id=? AND status IN ('paused','failed')""",
                 (_utc_now(), job_id),
             )
             connection.execute(
@@ -1153,6 +1215,48 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 (_utc_now(), job_id),
             )
         return self.get_transaction_backfill(job_id)
+
+    def _pause_backfill(self, job_id: str, reason: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE amazon_transaction_backfill_jobs
+                   SET status='paused', pause_reason=?, updated_at=? WHERE job_id=?""",
+                (reason, _utc_now(), job_id),
+            )
+        return self.get_transaction_backfill(job_id)
+
+    def _backfill_pause_reason(self, job: Mapping[str, object]) -> str | None:
+        source = self._source_row(str(job["source_id"]))
+        if source["last_error"] or source["status"] not in {"Connected", "Current"}:
+            return "SOURCE_SYNC_UNHEALTHY"
+        latest_sync = transaction_timestamp(source["last_sync_at"])
+        maximum_age = max(5, int(os.getenv(
+            "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_SOURCE_SYNC_AGE_MINUTES", "15"
+        )))
+        if latest_sync and datetime.now(timezone.utc) - latest_sync > timedelta(minutes=maximum_age):
+            return "SOURCE_SYNC_UNHEALTHY"
+        maximum_growth = max(1, int(os.getenv(
+            "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_DB_GROWTH_BYTES", str(128 * 1024 * 1024)
+        )))
+        if self.database_path.stat().st_size - int(job["starting_database_bytes"] or 0) > maximum_growth:
+            return "DATABASE_GROWTH_LIMIT"
+        minimum_free = max(0, int(os.getenv(
+            "AI_CASHFLOW_TRANSACTION_BACKFILL_MIN_FREE_DISK_BYTES", str(1024 * 1024 * 1024)
+        )))
+        if shutil.disk_usage(self.database_path.parent).free < minimum_free:
+            return "LOW_DISK_SPACE"
+        maximum_throttles = max(1, int(os.getenv(
+            "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_CONSECUTIVE_THROTTLES", "3"
+        )))
+        if int(job["consecutive_throttles"] or 0) >= maximum_throttles:
+            return "PERSISTENT_AMAZON_THROTTLING"
+        transactions = int(job["transactions_received"] or 0)
+        maximum_conflict_rate = min(1.0, max(0.0, float(os.getenv(
+            "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_CONFLICT_RATE", "0.05"
+        ))))
+        if transactions and int(job["status_conflicts"] or 0) / transactions > maximum_conflict_rate:
+            return "STATUS_CONFLICT_RATE"
+        return None
 
     def _fetch_transaction_page(
         self, client: Any, marketplace_id: str, status: str, start: datetime,
@@ -1175,6 +1279,9 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             job = self.get_transaction_backfill(job_id)
             if job["status"] != "running":
                 return job
+            pause_reason = self._backfill_pause_reason(job)
+            if pause_reason:
+                return self._pause_backfill(job_id, pause_reason)
             run_id = job["active_run_id"]
             if not run_id:
                 run_id = self._create_collection_run(
@@ -1207,6 +1314,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 self._stage_transaction_page(
                     run_id, list(page.get("transactions") or []), token,
                     str(page.get("rate_limit") or "") or None,
+                    int(page.get("throttled_attempts") or 0),
                 )
                 pages += 1
                 with self._connect() as connection:
@@ -1217,9 +1325,17 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                     connection.execute(
                         """UPDATE amazon_transaction_backfill_jobs SET next_token=?,
                            pages_completed=pages_completed+1,
-                           transactions_received=transactions_received+?, updated_at=? WHERE job_id=?""",
-                        (token, len(page.get("transactions") or []), _utc_now(), job_id),
+                           transactions_received=transactions_received+?,
+                           consecutive_throttles=CASE WHEN ? > 0
+                             THEN consecutive_throttles + 1 ELSE 0 END,
+                           updated_at=? WHERE job_id=?""",
+                        (token, len(page.get("transactions") or []),
+                         int(page.get("throttled_attempts") or 0), _utc_now(), job_id),
                     )
+                job = self.get_transaction_backfill(job_id)
+                pause_reason = self._backfill_pause_reason(job)
+                if pause_reason:
+                    return self._pause_backfill(job_id, pause_reason)
                 if token:
                     continue
                 metrics = self._promote_collection_run(run_id)
@@ -1234,12 +1350,18 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                         """UPDATE amazon_transaction_backfill_jobs SET
                            current_slice_start=?, current_slice_end=?, active_run_id=NULL, next_token=NULL,
                            observations_inserted=observations_inserted+?,
-                           current_state_updated=current_state_updated+?, status=?, last_error=NULL,
+                           current_state_updated=current_state_updated+?,
+                           status_conflicts=status_conflicts+?, status=?, last_error=NULL,
                            updated_at=?, completed_at=? WHERE job_id=?""",
                         (current_end.isoformat(), next_end.isoformat(), metrics["observations_inserted"],
-                         metrics["current_state_updated"], "completed" if done else "running", now,
+                         metrics["current_state_updated"], metrics["status_conflicts"],
+                         "completed" if done else "running", now,
                          now if done else None, job_id),
                     )
+                job = self.get_transaction_backfill(job_id)
+                pause_reason = self._backfill_pause_reason(job)
+                if pause_reason:
+                    return self._pause_backfill(job_id, pause_reason)
                 if done:
                     break
             except Exception as exc:
@@ -1327,6 +1449,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                         self._stage_transaction_page(
                             run_id, list(page.get("transactions") or []), token,
                             str(page.get("rate_limit") or "") or None,
+                            int(page.get("throttled_attempts") or 0),
                         )
                         remaining_pages -= 1
                         with self._connect() as connection:
@@ -1375,14 +1498,35 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    (SELECT COUNT(*) FROM amazon_transaction_state WHERE source_id=? AND conflict=1)""",
                 (source_id, source_id, source_id),
             ).fetchone()
+            status_events = connection.execute(
+                """SELECT transaction_id, previous_status, status, observation_at, retrieved_at,
+                          conflict_category, included_in_totals, resolution_reason
+                   FROM amazon_transaction_observations
+                   WHERE source_id=? AND previous_status IS NOT NULL AND previous_status<>status
+                   ORDER BY retrieved_at DESC LIMIT 100""",
+                (source_id,),
+            ).fetchall()
         return {
             "source_id": source_id,
             "checkpoints": [self._public_collection_row(row) for row in checkpoints],
             "runs": [self._public_collection_row(row) for row in runs],
-            "backfills": [self._public_collection_row(row) for row in jobs],
+            "backfills": [self._public_backfill_row(row) for row in jobs],
             "observation_count": counts[0],
             "current_state_count": counts[1],
             "status_conflict_count": counts[2],
+            "status_events": [
+                {
+                    "transaction_id_masked": f"***{str(row['transaction_id'])[-4:]}",
+                    "previous_status": row["previous_status"],
+                    "observed_status": row["status"],
+                    "observation_timestamp": row["observation_at"],
+                    "retrieval_timestamp": row["retrieved_at"],
+                    "conflict_category": row["conflict_category"],
+                    "included_in_totals": bool(row["included_in_totals"]),
+                    "resolution_reason": row["resolution_reason"],
+                }
+                for row in status_events
+            ],
             "database_bytes": self.database_path.stat().st_size,
         }
 
@@ -1443,43 +1587,55 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                        WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
                     (source_id, marketplace_id, transaction_id),
                 ).fetchone()
-                regressed = bool(current and current["status"] in {"RELEASED", "DEFERRED_RELEASED"} and status == "DEFERRED")
+                if current is not None and current["fingerprint"] == fingerprint:
+                    continue
+                observed_at = str(payload.get("postedDate") or "") or None
+                decision = transition_decision(
+                    current, status, observed_at, retrieved_text, fingerprint
+                )
                 connection.execute(
                     """INSERT OR IGNORE INTO amazon_transaction_observations
                        (source_id, marketplace_id, transaction_id, retrieved_at, status,
-                        currency, payload_json, fingerprint, conflict, run_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        currency, payload_json, fingerprint, conflict, run_id, observation_at,
+                        previous_status, conflict_category, included_in_totals, resolution_reason)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source_id, marketplace_id, transaction_id, retrieved_text, status,
-                     row_currency, serialized, fingerprint, int(regressed), run_id),
+                     row_currency, serialized, fingerprint, int(decision["conflict"]), run_id,
+                     observed_at, current["status"] if current else None,
+                     decision["category"], int(decision["included"]), decision["reason"]),
                 )
-                candidate_key = (retrieved_text, TRANSACTION_STATUS_RANK.get(status, -1), fingerprint)
-                current_key = (
-                    (current["retrieved_at"], TRANSACTION_STATUS_RANK.get(current["status"], -1), current["fingerprint"])
-                    if current else ("", -1, "")
-                )
-                if regressed:
+                if decision["conflict"]:
                     connection.execute(
-                        """UPDATE amazon_transaction_state SET conflict=1
+                        """UPDATE amazon_transaction_state SET conflict=1,
+                           conflict_category=?, included_in_totals=0, resolution_reason=?
                            WHERE source_id=? AND marketplace_id=? AND transaction_id=?""",
-                        (source_id, marketplace_id, transaction_id),
+                        (decision["category"], decision["reason"],
+                         source_id, marketplace_id, transaction_id),
                     )
                     LOGGER.warning(
                         "amazon_transaction_state_conflict source=%s marketplace=%s transaction=%s current=%s observed=%s",
                         source_id, marketplace_id, transaction_id[-8:], current["status"], status,
                     )
-                elif candidate_key > current_key:
+                if decision["promote"]:
                     connection.execute(
                         """INSERT INTO amazon_transaction_state
                            (source_id, marketplace_id, transaction_id, marketplace_name, currency,
-                            status, retrieved_at, payload_json, fingerprint, conflict, active_run_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                            status, retrieved_at, payload_json, fingerprint, conflict, active_run_id,
+                            observation_at, conflict_category, included_in_totals, resolution_reason)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(source_id, marketplace_id, transaction_id) DO UPDATE SET
                              marketplace_name=excluded.marketplace_name, currency=excluded.currency,
                              status=excluded.status, retrieved_at=excluded.retrieved_at,
                              payload_json=excluded.payload_json, fingerprint=excluded.fingerprint,
-                             active_run_id=excluded.active_run_id""",
+                             conflict=excluded.conflict, active_run_id=excluded.active_run_id,
+                             observation_at=excluded.observation_at,
+                             conflict_category=excluded.conflict_category,
+                             included_in_totals=excluded.included_in_totals,
+                             resolution_reason=excluded.resolution_reason""",
                         (source_id, marketplace_id, transaction_id, marketplace_name, row_currency,
-                         status, retrieved_text, serialized, fingerprint, run_id),
+                         status, retrieved_text, serialized, fingerprint, int(decision["conflict"]),
+                         run_id, observed_at, decision["category"],
+                         int(decision["included"]), decision["reason"]),
                     )
             if observed_ids:
                 connection.execute(
@@ -1581,7 +1737,10 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             amounts = {status: Decimal("0") for status in TRANSACTION_STATUSES}
             counts = {status: 0 for status in TRANSACTION_STATUSES}
             composition: dict[str, Decimal] = {}
-            visible = [row for row in selected if not row["conflict"]]
+            visible = [
+                row for row in selected
+                if not row["conflict"] and row["included_in_totals"]
+            ]
             for row in visible:
                 payload = json.loads(row["payload_json"])
                 status = row["status"]
@@ -1593,6 +1752,11 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 for bucket, amount in self._composition(payload).items():
                     composition[bucket] = composition.get(bucket, Decimal("0")) + amount
             relevant_checkpoints = [row for row in checkpoints if row["currency"] == selected_currency]
+            partial_failure = (
+                any(bool(row["last_error"]) for row in relevant_checkpoints)
+                or any(row["currency"] == selected_currency for row in failed_runs)
+            )
+            released_flow = amounts["RELEASED"] + amounts["DEFERRED_RELEASED"]
             return {
                 "classification": "AMAZON_TRANSACTION_DERIVED",
                 "currency": selected_currency,
@@ -1606,7 +1770,11 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "released_amount": str(amounts["RELEASED"].quantize(Decimal("0.01"))),
                 "deferred_released_count": counts["DEFERRED_RELEASED"],
                 "deferred_released_amount": str(amounts["DEFERRED_RELEASED"].quantize(Decimal("0.01"))),
+                "released_flow_count": counts["RELEASED"] + counts["DEFERRED_RELEASED"],
+                "released_flow_amount": str(released_flow.quantize(Decimal("0.01"))),
                 "conflict_count": sum(int(row["conflict"]) for row in selected),
+                "excluded_count": len(selected) - len(visible),
+                "totals_partial": len(selected) != len(visible) or partial_failure,
                 "composition": {
                     key: str(value.quantize(Decimal("0.01")))
                     for key, value in composition.items() if value
@@ -1615,10 +1783,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "coverage_end": max((row["coverage_end"] for row in relevant_checkpoints), default=None),
                 "retrieved_at": max((row["retrieved_at"] for row in relevant_checkpoints), default=None),
                 "pagination_complete": bool(relevant_checkpoints) and all(row["pagination_complete"] for row in relevant_checkpoints),
-                "partial_failure": (
-                    any(bool(row["last_error"]) for row in relevant_checkpoints)
-                    or any(row["currency"] == selected_currency for row in failed_runs)
-                ),
+                "partial_failure": partial_failure,
             }
 
         if requested:
@@ -1645,7 +1810,8 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 """SELECT retrieved_at, currency, status, payload_json
                    FROM amazon_transaction_observations
                    WHERE source_id=? AND run_id IN
-                     (SELECT run_id FROM amazon_transaction_runs WHERE status='completed')
+                      (SELECT run_id FROM amazon_transaction_runs WHERE status='completed')
+                     AND included_in_totals=1 AND conflict=0
                    ORDER BY retrieved_at""",
                 (source_id,),
             ).fetchall()

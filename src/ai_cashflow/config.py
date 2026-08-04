@@ -499,6 +499,21 @@ class AppConfig:
     transaction_max_seconds_per_sync: int = field(default_factory=lambda: _int_env(
         "AI_CASHFLOW_TRANSACTION_MAX_SECONDS_PER_SYNC", 20
     ))
+    transaction_backfill_max_db_growth_bytes: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_DB_GROWTH_BYTES", 128 * 1024 * 1024
+    ))
+    transaction_backfill_min_free_disk_bytes: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_BACKFILL_MIN_FREE_DISK_BYTES", 1024 * 1024 * 1024
+    ))
+    transaction_backfill_max_conflict_rate: float = field(default_factory=lambda: float(os.getenv(
+        "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_CONFLICT_RATE", "0.05"
+    )))
+    transaction_backfill_max_consecutive_throttles: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_CONSECUTIVE_THROTTLES", 3
+    ))
+    transaction_backfill_max_source_sync_age_minutes: int = field(default_factory=lambda: _int_env(
+        "AI_CASHFLOW_TRANSACTION_BACKFILL_MAX_SOURCE_SYNC_AGE_MINUTES", 15
+    ))
     transaction_retention_days: int = field(default_factory=lambda: _int_env(
         "AI_CASHFLOW_TRANSACTION_RETENTION_DAYS", 0
     ))
@@ -532,6 +547,14 @@ class AppConfig:
             raise ValueError("Transaction scheduler limits must be positive")
         if self.transaction_retention_days < 0:
             raise ValueError("Transaction retention days cannot be negative")
+        if (
+            self.transaction_backfill_max_db_growth_bytes < 1
+            or self.transaction_backfill_min_free_disk_bytes < 0
+            or not 0 <= self.transaction_backfill_max_conflict_rate <= 1
+            or self.transaction_backfill_max_consecutive_throttles < 1
+            or self.transaction_backfill_max_source_sync_age_minutes < 5
+        ):
+            raise ValueError("Transaction backfill safety limits are invalid")
 
     @property
     def supported_currencies(self) -> set[str]:

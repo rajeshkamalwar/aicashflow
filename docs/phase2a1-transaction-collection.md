@@ -29,15 +29,24 @@ Pages are written to `amazon_transaction_staging`. State, observation history,
 the successful checkpoint, and run completion are committed together only after
 Amazon returns no `nextToken`. Failed or yielded staging rows are never visible.
 
-Status precedence is:
+Status is resolved with an explicit transition matrix, never a global rank:
 
-1. `DEFERRED`
-2. `RELEASED`
-3. `DEFERRED_RELEASED`
+- `DEFERRED` to `DEFERRED_RELEASED` is the documented progression.
+- `DEFERRED` to `RELEASED` is unusual and excluded pending review.
+- `RELEASED` or `DEFERRED_RELEASED` to `DEFERRED` is a regression conflict.
+- `RELEASED` and `DEFERRED_RELEASED` may replace one another only when a newer
+  Amazon event timestamp (or a reliable retrieval-time fallback) distinguishes
+  them. Indistinguishable timestamps are ambiguous and excluded.
+- Same-status changes use the newest authoritative observation and do not create
+  a new conflict.
 
-Progression advances current state. A later lower-ranked observation is retained
-as audit evidence, marks the current row conflicted, and is excluded from visible
-transaction totals until reviewed.
+Each current-state row contributes to exactly one status subtotal or to the
+excluded bucket. Combined released flow is calculated as the sum of the disjoint
+`RELEASED` and `DEFERRED_RELEASED` subtotals.
+
+Administrator diagnostics mask transaction identifiers and report the previous
+and observed statuses, event and retrieval timestamps, category, inclusion flag,
+and resolution reason.
 
 ## Storage and retention
 
@@ -60,6 +69,10 @@ financially relevant fingerprint changes. `AI_CASHFLOW_TRANSACTION_RETENTION_DAY
 defaults to `0`, meaning unlimited audit retention. No automatic deletion is
 enabled; a non-zero retention policy must not be activated until finance approves
 the policy and maintenance procedure.
+
+Backfills also pause automatically when database growth, minimum free disk,
+conflict rate, consecutive throttling, or source-sync freshness crosses its
+configured safety threshold. A paused job keeps its immutable slice and token.
 
 ## Failed Phase 2A cleanup plan (not automatic)
 

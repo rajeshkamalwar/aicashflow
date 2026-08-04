@@ -15,6 +15,9 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.transaction_collection_enabled)
         self.assertFalse(config.transaction_visibility_enabled)
         self.assertEqual(config.transaction_retention_days, 0)
+        self.assertEqual(config.transaction_backfill_max_db_growth_bytes, 128 * 1024 * 1024)
+        self.assertEqual(config.transaction_backfill_min_free_disk_bytes, 1024 * 1024 * 1024)
+        self.assertEqual(config.transaction_backfill_max_conflict_rate, 0.05)
 
     def test_transaction_collection_can_be_enabled_without_visibility(self):
         with patch.dict(os.environ, {

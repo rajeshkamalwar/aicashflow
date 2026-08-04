@@ -53,7 +53,7 @@ class AmazonSpApiClientTests(unittest.TestCase):
                 return httpx.Response(429, headers={"Retry-After": "0.001"})
             return httpx.Response(200, json={"payload": {"transactions": []}})
         with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            AmazonSpApiClient(
+            page = AmazonSpApiClient(
                 AmazonSpApiConfig("client", "secret", "refresh"), http=http
             ).list_transactions_page(
                 "CA", "RELEASED",
@@ -62,6 +62,7 @@ class AmazonSpApiClientTests(unittest.TestCase):
             )
 
         self.assertEqual(attempts, 2)
+        self.assertEqual(page["throttled_attempts"], 1)
 
     def test_transaction_pages_follow_the_returned_request_rate(self):
         def handler(request: httpx.Request) -> httpx.Response:

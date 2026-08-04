@@ -149,6 +149,7 @@ class AmazonSpApiClient:
         if next_token:
             params["nextToken"] = next_token
         response = None
+        throttled_attempts = 0
         wait_seconds = self._transaction_next_request_at - monotonic()
         if wait_seconds > 0:
             sleep(wait_seconds)
@@ -158,6 +159,7 @@ class AmazonSpApiClient:
                 headers={"x-amz-access-token": token},
                 params=params,
             )
+            throttled_attempts += int(response.status_code == 429)
             if response.status_code not in {429, 500, 502, 503, 504}:
                 break
             if attempt == 3:
@@ -182,6 +184,7 @@ class AmazonSpApiClient:
             "transactions": [row for row in payload.get("transactions", []) if isinstance(row, dict)],
             "next_token": payload.get("nextToken") if isinstance(payload.get("nextToken"), str) else None,
             "rate_limit": response.headers.get("x-amzn-RateLimit-Limit"),
+            "throttled_attempts": throttled_attempts,
         }
 
     def get_current_balances(
