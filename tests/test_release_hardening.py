@@ -157,6 +157,15 @@ class ReleaseHardeningTests(unittest.TestCase):
                 }
                 with patch.dict(os.environ, environment, clear=True):
                     validate_production()
+                environment["AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED"] = "true"
+                environment["AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED"] = "false"
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, "visibility requires collection"):
+                        validate_production()
+                environment["AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED"] = "true"
+                with patch.dict(os.environ, environment, clear=True):
+                    validate_production()
+                environment["AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED"] = "false"
                 environment["AI_CASHFLOW_PUBLIC_ORIGIN"] = "https://aicashflow.pro"
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaisesRegex(ValueError, "canonical"):
@@ -219,6 +228,9 @@ class ReleaseHardeningTests(unittest.TestCase):
         deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
         rollback = (ROOT / "rollback.sh").read_text(encoding="utf-8")
         lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+        environment = (ROOT / ".env.example").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+        verifier = (ROOT / "verify-production.sh").read_text(encoding="utf-8")
 
         self.assertIn("--commit", deploy)
         self.assertIn("status --porcelain", deploy)
@@ -228,6 +240,13 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertIn("mv -T", deploy)
         self.assertIn("restore_previous_release", deploy)
         self.assertIn("verified current release must be bootstrapped", deploy)
+        for flag in (
+            "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED",
+            "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED",
+        ):
+            self.assertIn(f"{flag}=false", environment)
+            self.assertIn(flag, runbook)
+        self.assertIn("transaction flags", verifier)
         self.assertIn("Restart=on-failure", deploy)
         self.assertIn("StartLimitIntervalSec=", deploy)
         self.assertIn("StartLimitBurst=", deploy)

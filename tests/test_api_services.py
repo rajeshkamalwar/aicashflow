@@ -51,16 +51,30 @@ class Phase0ServiceTests(unittest.TestCase):
                 [{"transactionId": "T1", "transactionStatus": "DEFERRED", "totalAmount": {"currencyCode": "CAD", "currencyAmount": "4.25"}}],
                 datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc),
             )
-            service = Phase0Service(AppConfig(database_path=root / "ops.db", transaction_visibility_enabled=True))
+            visible_service = Phase0Service(AppConfig(
+                database_path=root / "ops.db",
+                transaction_collection_enabled=True,
+                transaction_visibility_enabled=True,
+            ))
+            hidden_service = Phase0Service(AppConfig(
+                database_path=root / "ops.db",
+                transaction_collection_enabled=True,
+                transaction_visibility_enabled=False,
+            ))
             with (
                 patch.dict("os.environ", {"AI_CASHFLOW_MASTER_KEY": key}),
                 patch("ai_cashflow.api.services.AmazonSpApiClient", FakePositionClient),
             ):
-                result = service.get_amazon_financial_position(source["id"], "CAD")
+                visible = visible_service.get_amazon_financial_position(source["id"], "CAD")
+                hidden = hidden_service.get_amazon_financial_position(source["id"], "CAD")
+                visible_again = visible_service.get_amazon_financial_position(source["id"], "CAD")
 
-        self.assertTrue(result["transaction_visibility_enabled"])
-        self.assertEqual(result["transaction_visibility"]["deferred_amount"], "4.25")
-        self.assertIsNone(next(row for row in result["financial_values"] if row["type"] == "UPCOMING_PAYOUT")["amount"] if any(row["type"] == "UPCOMING_PAYOUT" for row in result["financial_values"]) else None)
+        self.assertTrue(visible["transaction_visibility_enabled"])
+        self.assertEqual(visible["transaction_visibility"]["deferred_amount"], "4.25")
+        self.assertFalse(hidden["transaction_visibility_enabled"])
+        self.assertNotIn("transaction_visibility", hidden)
+        self.assertEqual(visible_again["transaction_visibility"]["deferred_amount"], "4.25")
+        self.assertIsNone(next(row for row in visible["financial_values"] if row["type"] == "UPCOMING_PAYOUT")["amount"] if any(row["type"] == "UPCOMING_PAYOUT" for row in visible["financial_values"]) else None)
 
     def test_cashflow_proof_coverage_includes_every_enabled_source_only(self):
         class FakeRegistry:

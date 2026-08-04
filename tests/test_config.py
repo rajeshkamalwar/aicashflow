@@ -8,9 +8,22 @@ from ai_cashflow.config import AppConfig
 
 
 class ConfigTests(unittest.TestCase):
-    def test_transaction_visibility_is_disabled_by_default(self):
+    def test_transaction_collection_and_visibility_are_disabled_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(AppConfig().transaction_visibility_enabled)
+            config = AppConfig()
+
+        self.assertFalse(config.transaction_collection_enabled)
+        self.assertFalse(config.transaction_visibility_enabled)
+
+    def test_transaction_collection_can_be_enabled_without_visibility(self):
+        with patch.dict(os.environ, {
+            "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED": "true",
+            "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "false",
+        }, clear=True):
+            config = AppConfig()
+
+        self.assertTrue(config.transaction_collection_enabled)
+        self.assertFalse(config.transaction_visibility_enabled)
 
     def test_transaction_visibility_can_be_enabled_explicitly(self):
         with patch.dict(os.environ, {"AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "true"}, clear=True):

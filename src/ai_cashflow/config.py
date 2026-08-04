@@ -478,6 +478,9 @@ class AppConfig:
     api_key: str | None = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_API_KEY"
     ))
+    transaction_collection_enabled: bool = field(default_factory=lambda: os.getenv(
+        "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"})
     transaction_visibility_enabled: bool = field(default_factory=lambda: os.getenv(
         "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED", "false"
     ).strip().lower() in {"1", "true", "yes", "on"})

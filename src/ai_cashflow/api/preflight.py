@@ -24,6 +24,8 @@ def validate_production() -> None:
         raise ValueError("AI_CASHFLOW_SMOKE_SOURCE_ID is required.")
 
     config = AppConfig()
+    if config.transaction_visibility_enabled and not config.transaction_collection_enabled:
+        raise ValueError("Transaction visibility requires collection in production.")
     paths = {
         "samples directory": config.samples_dir,
         "reports directory": config.reports_dir,
@@ -41,4 +43,7 @@ if __name__ == "__main__":
         validate_production()
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Production validation failed: {exc}") from None
+    config = AppConfig()
+    print(f"collection enabled: {'yes' if config.transaction_collection_enabled else 'no'}")
+    print(f"visibility enabled: {'yes' if config.transaction_visibility_enabled else 'no'}")
     print("Production validation passed.")

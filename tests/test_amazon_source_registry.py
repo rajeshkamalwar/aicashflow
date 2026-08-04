@@ -256,17 +256,106 @@ class AmazonSourceRegistryTests(unittest.TestCase):
                 "marketplaceDetails": {"marketplaceId": "CA", "marketplaceName": "Amazon.ca"},
                 "totalAmount": {"currencyCode": "CAD", "currencyAmount": 0},
             }])
+            registry.record_transaction_snapshot(
+                source["id"], "CA", "Amazon.ca", "CAD", "RELEASED",
+                [{
+                    "transactionId": "T1",
+                    "transactionStatus": "RELEASED",
+                    "totalAmount": {"currencyCode": "CAD", "currencyAmount": "4.25"},
+                }],
+                datetime(2026, 8, 4, 9, 55, tzinfo=timezone.utc),
+            )
 
-            with patch.dict("os.environ", {"AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "true"}):
+            with patch.dict("os.environ", {
+                "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED": "true",
+                "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "false",
+            }):
                 result = registry.sync_source(source["id"], FakeClient(), root / "samples")
 
             self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["open_balance_sync_status"], "completed")
+            self.assertEqual(result["transaction_collection_status"], "partial")
             self.assertEqual(result["transaction_errors"], 1)
             self.assertEqual(registry.get_source(source["id"])["status"], "Connected")
             visibility = registry.transaction_visibility(source["id"], "CAD")
-            self.assertEqual(visibility["count"], 0)
+            self.assertEqual(visibility["released_amount"], "4.25")
             self.assertTrue(visibility["partial_failure"])
             self.assertEqual(visibility["marketplaces"], ["Amazon.ca"])
+
+    def test_collection_flag_collects_and_checkpoints_while_visibility_is_disabled(self):
+        class FakeClient:
+            statuses = []
+
+            def list_settlement_reports(self):
+                return []
+
+            def list_transactions_by_status(self, _marketplace_id, status, _posted_after):
+                self.statuses.append(status)
+                if status != "DEFERRED":
+                    return []
+                return [{
+                    "transactionId": "T1",
+                    "transactionStatus": "DEFERRED",
+                    "totalAmount": {"currencyCode": "CAD", "currencyAmount": "4.25"},
+                }]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = self.make_registry(root)
+            source = registry.upsert({"name": "Canada", "client_id": "a", "client_secret": "b", "refresh_token": "c"})
+            registry.record_connection_test(source["id"], [{
+                "marketplaceDetails": {"marketplaceId": "CA", "marketplaceName": "Amazon.ca"},
+                "totalAmount": {"currencyCode": "CAD", "currencyAmount": 0},
+            }])
+            client = FakeClient()
+
+            with patch.dict("os.environ", {
+                "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED": "true",
+                "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "false",
+            }):
+                result = registry.sync_source(source["id"], client, root / "samples")
+
+            visibility = registry.transaction_visibility(source["id"], "CAD")
+
+        self.assertCountEqual(client.statuses, ["DEFERRED", "RELEASED", "DEFERRED_RELEASED"])
+        self.assertEqual(result["transaction_collection_status"], "completed")
+        self.assertEqual(result["transaction_observations"], 1)
+        self.assertEqual(visibility["deferred_amount"], "4.25")
+        self.assertIsNotNone(visibility["retrieved_at"])
+        self.assertTrue(visibility["pagination_complete"])
+
+    def test_visibility_flag_alone_does_not_call_amazon_transactions(self):
+        class FakeClient:
+            def list_settlement_reports(self):
+                return []
+
+            def list_transactions_by_status(self, *_args):
+                raise AssertionError("visibility must not trigger Amazon collection")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = self.make_registry(root)
+            source = registry.upsert({"name": "Canada", "client_id": "a", "client_secret": "b", "refresh_token": "c"})
+            registry.record_connection_test(source["id"], [{
+                "marketplaceDetails": {"marketplaceId": "CA", "marketplaceName": "Amazon.ca"},
+                "totalAmount": {"currencyCode": "CAD", "currencyAmount": 0},
+            }])
+
+            with patch.dict("os.environ", {
+                "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED": "false",
+                "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "false",
+            }):
+                disabled = registry.sync_source(source["id"], FakeClient(), root / "samples")
+            with patch.dict("os.environ", {
+                "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED": "false",
+                "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED": "true",
+            }):
+                result = registry.sync_source(source["id"], FakeClient(), root / "samples")
+
+        self.assertEqual(disabled["transaction_collection_status"], "disabled")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["transaction_collection_status"], "disabled")
+        self.assertEqual(result["transaction_observations"], 0)
 
 
 if __name__ == "__main__":

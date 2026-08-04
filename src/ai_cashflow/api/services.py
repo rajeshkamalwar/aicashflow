@@ -738,7 +738,10 @@ class Phase0Service:
         if not source["enabled"] or source["status"] != "Connected":
             raise ValueError("The selected Amazon source is not connected and enabled.")
         requested_currency = str(currency or "").strip().upper()
-        cache_key = f"{source_id}:{requested_currency or '*'}"
+        cache_key = (
+            f"{source_id}:{requested_currency or '*'}:"
+            f"{int(self.config.transaction_visibility_enabled)}"
+        )
         with _AMAZON_FINANCIAL_POSITION_CACHE_LOCK:
             cached = _AMAZON_FINANCIAL_POSITION_CACHE.get(cache_key)
         if (

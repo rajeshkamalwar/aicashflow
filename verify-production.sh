@@ -8,7 +8,7 @@ CANONICAL="https://www.aicashflow.pro"
 
 usage() {
   echo "Usage: sudo bash verify-production.sh [--post-deploy <40-character-commit>]"
-  echo "Reports safe PASS/FAIL results only; it never prints protected values."
+  echo "Reports safe status and PASS/FAIL results; it never prints protected values."
 }
 
 POST_COMMIT=""
@@ -64,9 +64,14 @@ check "Nginx request-size limit" bash -c "grep -q 'client_max_body_size 11m;' '$
 check "port 8001 loopback listener" bash -c "ss -ltn | grep -qE '127\\.0\\.0\\.1:8001[[:space:]]'"
 
 if [[ -r "$ENV_FILE" && -x "$CURRENT_LINK/.venv/bin/python" ]]; then
-  check "production environment and writable paths" runuser -u aicashflow -- bash -c "set -a; source '$ENV_FILE'; set +a; PYTHONPATH='$CURRENT_LINK/src' '$CURRENT_LINK/.venv/bin/python' -m ai_cashflow.api.preflight"
+  if runuser -u aicashflow -- bash -c "set -a; source '$ENV_FILE'; set +a; PYTHONPATH='$CURRENT_LINK/src' '$CURRENT_LINK/.venv/bin/python' -m ai_cashflow.api.preflight"; then
+    echo "[PASS] production environment, transaction flags, and writable paths"
+  else
+    echo "[FAIL] production environment, transaction flags, and writable paths"
+    failures=$((failures + 1))
+  fi
 else
-  echo "[FAIL] production environment and writable paths"
+  echo "[FAIL] production environment, transaction flags, and writable paths"
   failures=$((failures + 1))
 fi
 

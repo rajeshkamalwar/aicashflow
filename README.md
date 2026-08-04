@@ -12,11 +12,13 @@ The approved BRD is the source document for the program. The working approach is
 
 Start with the Phase 0 package in [`phase0/README.md`](phase0/README.md).
 
-## Amazon transaction visibility
+## Amazon transaction collection and visibility
 
-`AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED` defaults to `false`. When enabled,
-the dashboard reads transaction snapshots persisted by the normal source sync;
-it does not call Amazon while rendering. Observations are append-only while one
+Both `AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED` and
+`AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED` default to `false`. Collection
+runs only during source synchronization. Visibility only reads persisted
+snapshots and never calls Amazon while rendering. Production visibility
+requires collection to be enabled. Observations are append-only while one
 canonical current row is retained per source, marketplace, and transaction ID.
 Observation storage grows when Amazon returns changed records. Review database
 growth before long-term enablement and add retention only after the required

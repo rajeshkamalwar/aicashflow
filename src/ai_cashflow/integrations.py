@@ -985,10 +985,12 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         transaction_errors = 0
         transaction_rows = 0
         list_by_status = getattr(client, "list_transactions_by_status", None)
-        visibility_enabled = os.getenv(
-            "AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED", "false"
+        collection_enabled = os.getenv(
+            "AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED", "false"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        if visibility_enabled and callable(list_by_status):
+        transaction_collection_status = "disabled"
+        if collection_enabled and callable(list_by_status):
+            transaction_collection_status = "completed"
             retrieved = datetime.now(timezone.utc)
             coverage_end = retrieved - timedelta(minutes=2)
             coverage_start = coverage_end - timedelta(days=179)
@@ -1020,12 +1022,19 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                             "amazon_transaction_sync_partial source=%s marketplace=%s status=%s error=%s",
                             source_id, marketplace_id, status, type(exc).__name__,
                         )
+        elif collection_enabled:
+            transaction_errors = 1
+            transaction_collection_status = "partial"
         completed_at = _utc_now()
         sync_status = "partial" if transaction_errors else "completed"
+        if transaction_errors:
+            transaction_collection_status = "partial"
         message = (
             f"Ingested {ingested} new settlement report(s); stored {transaction_rows} "
             f"transaction observation(s)."
         )
+        if not collection_enabled:
+            message += " Transaction collection is disabled."
         if transaction_errors:
             message += f" {transaction_errors} transaction request(s) retained their last successful snapshot."
         with self._connect() as connection:
@@ -1047,6 +1056,9 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         return {
             "source_id": source_id,
             "status": sync_status,
+            "open_balance_sync_status": "completed",
+            "transaction_collection_enabled": collection_enabled,
+            "transaction_collection_status": transaction_collection_status,
             "reports_found": len(reports),
             "reports_ingested": ingested,
             "transaction_observations": transaction_rows,

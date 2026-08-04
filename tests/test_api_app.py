@@ -27,6 +27,23 @@ def create_app():
 
 
 class ApiAppTests(unittest.TestCase):
+    def test_marketplace_ar_and_api_status_remain_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = create_app()
+            app.dependency_overrides[get_phase0_service] = lambda: Phase0Service(AppConfig(
+                samples_dir=PHASE0_FIXTURES,
+                reports_dir=root / "reports",
+                database_path=root / "ops.db",
+            ))
+            client = TestClient(app)
+
+            marketplace_ar = client.get("/phase0/marketplace-ar")
+            api_status = client.get("/phase0/api-status")
+
+        self.assertEqual(marketplace_ar.status_code, 200)
+        self.assertEqual(api_status.status_code, 200)
+
     def test_phase2a_transaction_visibility_wording_is_coverage_qualified(self):
         web_root = Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web"
         content = (web_root / "app.html").read_text(encoding="utf-8") + (web_root / "app.js").read_text(encoding="utf-8")
@@ -37,6 +54,8 @@ class ApiAppTests(unittest.TestCase):
         self.assertIn("Observed within the last 179 days", content)
         self.assertIn("AMAZON_TRANSACTION_DERIVED", content)
         self.assertNotIn("open plus deferred", content.lower())
+        self.assertIn('const enabled = Boolean(position?.transaction_visibility_enabled);', content)
+        self.assertIn('if (!enabled) return;', content)
 
     def test_overview_loads_current_cash_positions_for_all_connected_sources(self):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")

@@ -128,6 +128,11 @@ for direct loopback requests. It is rejected in test and production.
 - The environment file must include the canonical public origin, the external
   data paths from `.env.example`, an approved smoke-test source ID, and a
   smoke-only Basic Auth credential. These values are never printed by scripts.
+- Amazon transaction collection and visibility both default to disabled. For a
+  collection-only validation rollout, set
+  `AI_CASHFLOW_TRANSACTION_COLLECTION_ENABLED=true` and
+  `AI_CASHFLOW_TRANSACTION_VISIBILITY_ENABLED=false`. Production preflight
+  rejects visibility when collection is disabled.
 - The certificate paths referenced by `nginx_vhost.conf` must contain a valid
   certificate for both `aicashflow.pro` and `www.aicashflow.pro`.
 - Before the first Phase 1C deployment, a separately reviewed one-time
@@ -200,8 +205,9 @@ sudo bash /opt/aicashflow/current/verify-production.sh
 
 It emits safe PASS/FAIL labels for configuration shape, protected metadata,
 systemd, loopback binding, Nginx, redirects, size limits, writable paths, and
-the active release. It never prints protected values and intentionally does
-not run `nginx -T`.
+the active release, plus safe yes/no transaction collection and visibility
+status. It never prints protected values and intentionally does not run
+`nginx -T`.
 
 ### Rollback
 
@@ -211,9 +217,9 @@ sudo bash /opt/aicashflow/current/rollback.sh
 
 Rollback atomically restores `/opt/aicashflow/previous`, restarts the service,
 and checks health. The failed release remains under `/opt/aicashflow/releases`
-for investigation. Phase 1C has no database migration and does not modify the
-database during deployment or rollback; releases therefore assume the same
-Phase 1B database schema.
+for investigation. Phase 2A transaction tables are additive and persisted
+outside release directories; hiding visibility or rolling back code does not
+delete observations, checkpoints, or canonical transaction state.
 
 Leave `AI_CASHFLOW_API_KEY_PREVIOUS` set only for the planned rotation window.
 
