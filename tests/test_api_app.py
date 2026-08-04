@@ -72,6 +72,7 @@ class ApiAppTests(unittest.TestCase):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('fetchJson("/phase0/marketplace-activity").catch', app_js)
+        self.assertIn("Only successful, positive Closed transfers.", app_js)
         self.assertIn('state.marketplaceActivityStatus', app_js)
         self.assertIn('Marketplace activity is temporarily unavailable.', app_js)
 

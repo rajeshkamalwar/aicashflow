@@ -1091,7 +1091,7 @@ function renderTransactionVisibility(position) {
     : (position?.recent_completed_payout ? [[position.recent_completed_payout.currency, position.recent_completed_payout]] : []);
   renderRows("overview-completed-payout", completed.map(([currency, row]) => ({ currency, amount: row?.amount })));
   setText("overview-completed-payout-note", completed.length
-    ? completed.map(([, row]) => `${row.transfer_date || "Date unavailable"} · ${row.financial_event_group_id || "ID unavailable"}`).join(" · ")
+    ? `Only successful, positive Closed transfers. ${completed.map(([, row]) => `${row.transfer_date || "Date unavailable"} · ${row.financial_event_group_id || "ID unavailable"}`).join(" · ")}`
     : "No successful, positive Closed transfer is available in this scope.");
 
   const coverageStarts = entries.map(([, row]) => row?.coverage_start).filter(Boolean).sort();
