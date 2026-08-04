@@ -373,9 +373,9 @@ async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
       message: error.message,
     };
   }
-  if (_financialPositionRequests.get(sourceId) !== requestId) return null;
+  const isLatestRequest = _financialPositionRequests.get(sourceId) === requestId;
   const isCurrentSelection = sourceId === state.filters.sourceId && currency === state.filters.currency;
-  state.amazonFinancialPositions[sourceId] = position;
+  if (isLatestRequest) state.amazonFinancialPositions[sourceId] = position;
   if (isCurrentSelection) state.amazonFinancialPosition = position;
   return position;
 }

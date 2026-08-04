@@ -44,7 +44,7 @@ class ReleaseHardeningTests(unittest.TestCase):
             "sync failure": "Source synchronization",
             "sync reset": "button.textContent = \"Sync selected source\";",
             "isolated renderer failure": 'renderSafely("Financial cards", renderTreasuryOverview)',
-            "stale response protection": "_financialPositionRequests.get(sourceId) !== requestId",
+            "stale response protection": "const isLatestRequest = _financialPositionRequests.get(sourceId) === requestId",
         }
         for scenario, expected in checks.items():
             with self.subTest(scenario=scenario):
