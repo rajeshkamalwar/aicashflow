@@ -1,6 +1,7 @@
 """Service layer for Phase 0 API routes."""
 
 import csv
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -762,7 +763,7 @@ class Phase0Service:
         return reports
 
     def get_amazon_financial_position(
-        self, source_id: str, currency: str | None = None
+        self, source_id: str, currency: str | None = None, snapshot_id: str | None = None
     ) -> dict[str, object]:
         """Return one source's current Seller Central statement calculation in USD."""
         master_key = os.getenv("AI_CASHFLOW_MASTER_KEY", "")
@@ -770,21 +771,42 @@ class Phase0Service:
             raise ValueError("The integration encryption key has not been provisioned.")
         registry = AmazonSourceRegistry(self.config.database_path, master_key)
         source = registry.get_source(source_id)
+        snapshot_metadata = registry.financial_snapshot_metadata(source_id)
+        snapshot_version = f"{source.get('last_sync_at')}:{snapshot_metadata['transaction_snapshot_id']}"
         if not source["enabled"] or source["status"] != "Connected":
             raise ValueError("The selected Amazon source is not connected and enabled.")
         requested_currency = str(currency or "").strip().upper()
-        cache_key = (
-            f"{source_id}:{requested_currency or '*'}:"
-            f"{int(self.config.transaction_visibility_enabled)}"
-        )
+        cache_key = f"{source_id}:{int(self.config.transaction_visibility_enabled)}"
         with _AMAZON_FINANCIAL_POSITION_CACHE_LOCK:
             cached = _AMAZON_FINANCIAL_POSITION_CACHE.get(cache_key)
         if (
             cached
-            and cached[1] == source["last_sync_at"]
+            and cached[1] == snapshot_version
             and monotonic() - cached[0] < AMAZON_FINANCIAL_POSITION_CACHE_SECONDS
         ):
-            return cached[2]
+            cached_result = cached[2]
+            cached_scope = str(cached_result.get("currency_scope") or "ALL")
+            cached_totals = cached_result.get("totals_by_currency") or {}
+            if (not requested_currency and cached_scope == "ALL") or (
+                requested_currency and requested_currency in cached_totals
+            ):
+                result = deepcopy(cached_result)
+                if requested_currency:
+                    native_amount = str(cached_totals[requested_currency])
+                    result["currency_scope"] = requested_currency
+                    result["source_currency"] = requested_currency
+                    result["totals_by_currency"] = {requested_currency: native_amount}
+                    result.setdefault("source_amounts", {})["standard_balance"] = native_amount
+                    for value in result.get("financial_values", []):
+                        if value.get("type") == "OPEN_BALANCE":
+                            value["amount"] = native_amount
+                            value["currency"] = requested_currency
+                if self.config.transaction_visibility_enabled:
+                    result["transaction_visibility"] = registry.transaction_visibility(
+                        source_id, requested_currency or None
+                    )
+                result["snapshot_refreshed"] = bool(snapshot_id and snapshot_id != result.get("snapshot_id"))
+                return result
         marketplaces = [
             row for row in source.get("marketplaces", [])
             if row.get("is_participating")
@@ -844,6 +866,7 @@ class Phase0Service:
                 self.config.tenant.reconciliation.usd_exchange_rates_as_of
             ),
             "transaction_visibility_enabled": self.config.transaction_visibility_enabled,
+            "currency_scope": requested_currency or "ALL",
         })
         if self.config.transaction_visibility_enabled:
             result["transaction_visibility"] = registry.transaction_visibility(
@@ -853,6 +876,33 @@ class Phase0Service:
             result.get("as_of")
             or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
+        snapshot_seed = json.dumps(
+            {
+                "source_id": source_id,
+                "source_sync_run_id": snapshot_metadata["source_sync_run_id"],
+                "financial_group_retrieved_at": retrieved_at,
+                "totals": result.get("totals_by_currency") or {
+                    str(result.get("source_currency") or requested_currency):
+                    str((result.get("source_amounts") or {}).get("standard_balance"))
+                },
+            }, sort_keys=True, separators=(",", ":"),
+        )
+        result.update({
+            "snapshot_id": hashlib.sha256(snapshot_seed.encode()).hexdigest()[:24],
+            "snapshot_created_at": retrieved_at,
+            "source_sync_run_id": snapshot_metadata["source_sync_run_id"],
+            "financial_group_retrieved_at": retrieved_at,
+            "transaction_snapshot_id": snapshot_metadata["transaction_snapshot_id"],
+            "transaction_snapshot_retrieved_at": snapshot_metadata["transaction_snapshot_retrieved_at"],
+            "data_version": source.get("last_sync_at"),
+            "snapshot_refreshed": bool(snapshot_id),
+        })
+        if result.get("source_currency") and not result.get("totals_by_currency"):
+            result["totals_by_currency"] = {
+                str(result["source_currency"]): str(
+                    (result.get("source_amounts") or {}).get("standard_balance")
+                )
+            }
         fx_as_of = self.config.tenant.reconciliation.usd_exchange_rates_as_of
         fx_max_age_days = (
             self.config.tenant.reconciliation.usd_exchange_rates_max_age_days
@@ -955,7 +1005,7 @@ class Phase0Service:
         with _AMAZON_FINANCIAL_POSITION_CACHE_LOCK:
             _AMAZON_FINANCIAL_POSITION_CACHE[cache_key] = (
                 monotonic(),
-                source["last_sync_at"],
+                snapshot_version,
                 result,
             )
         return result

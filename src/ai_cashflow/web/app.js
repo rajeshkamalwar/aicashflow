@@ -41,6 +41,7 @@ const state = {
   amazonSyncs: [],
   amazonFinancialPosition: null,
   amazonFinancialPositions: {},
+  amazonFinancialSnapshotIds: {},
   amazonTransactionDiagnostics: null,
   sellerStatement: null,
   lastSyncAt: null,
@@ -365,8 +366,9 @@ async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
   const currency = sourceId === state.filters.sourceId ? state.filters.currency : "";
   let position;
   try {
+    const snapshotId = state.amazonFinancialSnapshotIds[sourceId] || "";
     position = await fetchJson(
-      `/phase0/amazon/financial-position?source_id=${encodeURIComponent(sourceId)}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
+      `/phase0/amazon/financial-position?source_id=${encodeURIComponent(sourceId)}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}${snapshotId ? `&snapshot_id=${encodeURIComponent(snapshotId)}` : ""}`
     );
   } catch (error) {
     position = {
@@ -377,6 +379,7 @@ async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
   }
   const isLatestRequest = _financialPositionRequests.get(sourceId) === requestId;
   const isCurrentSelection = sourceId === state.filters.sourceId && currency === state.filters.currency;
+  if (position?.snapshot_id) state.amazonFinancialSnapshotIds[sourceId] = position.snapshot_id;
   if (isLatestRequest) state.amazonFinancialPositions[sourceId] = position;
   if (isCurrentSelection) state.amazonFinancialPosition = position;
   return position;

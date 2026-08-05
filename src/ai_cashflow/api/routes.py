@@ -706,11 +706,16 @@ def phase0_amazon_settlement_reports(
 def phase0_amazon_financial_position(
     source_id: str,
     currency: str | None = None,
+    snapshot_id: str | None = None,
     _: None = Depends(require_api_key),
     service: Phase0Service = Depends(get_phase0_service),
 ) -> dict[str, object]:
     try:
-        response = service.get_amazon_financial_position(source_id, currency)
+        response = (
+            service.get_amazon_financial_position(source_id, currency, snapshot_id)
+            if snapshot_id
+            else service.get_amazon_financial_position(source_id, currency)
+        )
         response.pop("financial_event_group_diagnostics", None)
         return response
     except ValueError as exc:
