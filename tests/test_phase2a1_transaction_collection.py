@@ -134,7 +134,8 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         for _ in range(3):
             job = self.registry.run_transaction_backfill(job["job_id"], client)
 
-        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+        visibility = self.registry.transaction_visibility(self.source["id"], "CAD")
+        coverage = visibility["coverage"]
 
         self.assertEqual(job["status"], "completed")
         self.assertTrue(coverage["is_complete"])
@@ -144,6 +145,7 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         self.assertEqual(coverage["completed_slice_count"], 3)
         self.assertEqual(coverage["completed_start"], self.start.isoformat())
         self.assertEqual(coverage["completed_end"], checkpoint_end.isoformat())
+        self.assertFalse(visibility["totals_partial"])
 
     def test_completed_canary_preserves_observed_coverage_without_starting_backfill(self):
         checkpoint_start = self.end + timedelta(hours=14)
@@ -225,13 +227,15 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         job = self.create_job()
         self.registry.run_transaction_backfill(job["job_id"], PagedClient(), max_pages=1)
 
-        coverage = self.registry.transaction_visibility(self.source["id"], "CAD")["coverage"]
+        visibility = self.registry.transaction_visibility(self.source["id"], "CAD")
+        coverage = visibility["coverage"]
 
         self.assertEqual(coverage["historical_backfill_status"], "PARTIALLY_COMPLETE")
         self.assertEqual(coverage["completed_slice_count"], 1)
         self.assertEqual(coverage["pending_slice_count"], 2)
         self.assertTrue(coverage["has_gaps"])
         self.assertFalse(coverage["is_historically_complete"])
+        self.assertTrue(visibility["totals_partial"])
 
     def test_failed_historical_slice_prevents_complete(self):
         job = self.create_job(overall_end=self.start + timedelta(days=1))

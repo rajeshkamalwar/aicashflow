@@ -1973,7 +1973,7 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 "released_flow_amount": str(released_flow.quantize(Decimal("0.01"))),
                 "conflict_count": sum(int(row["conflict"]) for row in selected),
                 "excluded_count": len(selected) - len(visible),
-                "totals_partial": len(selected) != len(visible) or partial_failure,
+                "totals_partial": not coverage_complete or len(selected) != len(visible) or partial_failure,
                 "coverage": coverage,
                 "reconciliation_state": coverage["classification"],
                 "composition": {
