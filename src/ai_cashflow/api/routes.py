@@ -726,7 +726,7 @@ def phase0_amazon_financial_position(
 
 @router.get("/phase0/amazon/canonical-payout-state", response_model=dict[str, object])
 def phase0_amazon_canonical_payout_state(
-    source_id: str,
+    source_id: str | None = None,
     currency: str | None = None,
     _: None = Depends(require_api_key),
     service: Phase0Service = Depends(get_phase0_service),

@@ -119,7 +119,7 @@ class Phase0Service:
         return ReportRunResult(status="generated", reports_dir=reports_dir)
 
     def get_canonical_payout_state(
-        self, source_id: str, currency: str | None = None,
+        self, source_id: str | None = None, currency: str | None = None,
     ) -> dict[str, object]:
         """Read persisted canonical payouts without refreshing Amazon."""
         master_key = os.getenv("AI_CASHFLOW_MASTER_KEY", "")

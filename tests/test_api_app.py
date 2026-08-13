@@ -260,6 +260,18 @@ class ApiAppTests(unittest.TestCase):
         self.assertEqual(service.request, ("books-ca", "CAD"))
         self.assertEqual(response.json()["financial_event_group_snapshot_id"], "persisted-snapshot")
 
+    def test_canonical_payout_state_endpoint_supports_the_report_all_source_scope(self):
+        class FakeService:
+            config = SimpleNamespace(api_key="")
+            def get_canonical_payout_state(self, source_id=None, currency=None):
+                self.request = (source_id, currency)
+                return {"availability": "DATA_AVAILABLE"}
+        app = create_app(); service = FakeService()
+        app.dependency_overrides[get_phase0_service] = lambda: service
+        response = TestClient(app).get("/phase0/amazon/canonical-payout-state")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(service.request, (None, None))
+
     def test_amazon_source_api_manages_multiple_masked_profiles(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app()

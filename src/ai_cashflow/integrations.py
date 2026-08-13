@@ -931,13 +931,13 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             )
 
     def get_canonical_payout_state(
-        self, source_id: str, currency: str | None = None,
+        self, source_id: str | None = None, currency: str | None = None,
     ) -> dict[str, Any]:
         """Return persisted payout state without contacting Amazon."""
         with self._connect() as connection:
             connection.execute("BEGIN")
             return read_canonical_payout_state(
-                connection, source_ids={source_id}, currency=currency,
+                connection, source_ids={source_id} if source_id else None, currency=currency,
             )
 
     def financial_snapshot_metadata(self, source_id: str) -> dict[str, str | int | None]:
