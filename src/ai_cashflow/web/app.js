@@ -3328,6 +3328,17 @@ function renderSettings() {
     Boolean(tenant.client_setup?.governance?.ai_enabled);
   document.getElementById("settings-human-approval").checked =
     tenant.client_setup?.governance?.human_approval_required !== false;
+  const reconciliation = state.amazonFinancialPosition?.statement_reconciliation;
+  const reconciliationEl = document.getElementById("seller-central-reconciliation");
+  if (reconciliationEl) {
+    const comparison = (label, value) => `<div><b>${escapeHtml(label)}</b> ${escapeHtml(value?.reconciliation_status || "NOT_AVAILABLE")}</div>`;
+    reconciliationEl.innerHTML = reconciliation ? `<strong>Seller Central Statement Reconciliation</strong>
+      ${comparison("Standard orders:", reconciliation.standard_orders)}${comparison("Recent payout:", reconciliation.recent_payout)}
+      <div><b>Deferred:</b> Seller Central reported — API mapping pending</div>
+      <div><b>Funds Available:</b> Seller Central reported — API mapping pending</div>
+      <div><b>Account Level Reserve:</b> Seller Central reported — API mapping pending</div>`
+      : "Seller Central Statement Reconciliation: no matching statement snapshot.";
+  }
   renderSetupCards(
     "entities-editor",
     "entity",

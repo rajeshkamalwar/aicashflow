@@ -1011,6 +1011,44 @@ class Phase0Service:
                 "label": "Payout Amount",
             },
         }
+        if marketplace and source_currency:
+            statement = registry.latest_seller_central_statement_snapshot(
+                source_id, str(marketplace["id"]), source_currency
+            )
+            now = datetime.now(timezone.utc)
+            observed = None
+            if statement:
+                try:
+                    observed = datetime.fromisoformat(str(statement["observed_at"]).replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            freshness = "NOT_AVAILABLE" if not statement else (
+                "FRESH" if observed and now - observed <= timedelta(minutes=30) else
+                "STALE" if observed and now - observed <= timedelta(hours=24) else "EXPIRED"
+            )
+            automatic_standard = (result.get("source_amounts") or {}).get("standard_balance")
+            automatic_payout = (result.get("recent_completed_payout") or {}).get("amount")
+            def comparison(automatic: object, manual: object) -> dict[str, object]:
+                if manual is None or automatic is None: status = "NOT_AVAILABLE"
+                elif freshness != "FRESH": status = "TIMING_DIFFERENCE"
+                else: status = "MATCH" if Decimal(str(automatic)) == Decimal(str(manual)) else "DIFFERENCE"
+                difference = (str(Decimal(str(automatic)) - Decimal(str(manual)))
+                              if automatic is not None and manual is not None else None)
+                return {"automatic_amount": automatic, "seller_central_reported_amount": manual,
+                        "difference": difference, "timing_delta": None if not observed else str(now - observed),
+                        "reconciliation_status": status}
+            manual = statement or {}
+            result["statement_reconciliation"] = {
+                "statement_snapshot_id": manual.get("id"), "source_id": source_id,
+                "marketplace_id": marketplace["id"], "currency": source_currency,
+                "observed_at": manual.get("observed_at"), "freshness": freshness,
+                "standard_orders": comparison(automatic_standard, manual.get("standard_orders")),
+                "recent_payout": comparison(automatic_payout, manual.get("recent_payout")),
+                **{name: {"seller_central_reported_amount": manual.get(field), "authority": "SELLER_CENTRAL_REPORTED",
+                           "automatic_equivalent_status": "NOT_PROVEN"}
+                   for name, field in (("deferred", "deferred_transactions"), ("funds_available", "funds_available"),
+                                       ("account_level_reserve", "account_level_reserve"), ("all_accounts", "all_accounts"))},
+            }
         self.audit(
             "amazon.financial_position.read",
             f"{source['id']} {marketplace['id'] if marketplace else 'multi'} USD",
