@@ -38,10 +38,115 @@ TRANSACTION_STATUSES = ("DEFERRED", "DEFERRED_RELEASED", "RELEASED")
 TRANSACTION_JOB_TYPES = (
     "CANARY", "INCREMENTAL_SYNC", "HISTORICAL_BACKFILL", "LEGACY_UNCLASSIFIED",
 )
+CANONICAL_PAYOUT_CLASSIFICATIONS = (
+    "COMPLETED_PAYOUT", "COMPLETED_CHARGE", "FAILED_SETTLEMENT",
+    "TRANSFER_PENDING", "ZERO_VALUE_SETTLEMENT", "OPEN_BALANCE_GROUP",
+    "SETTLEMENT_STATUS_UNKNOWN",
+)
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def read_canonical_payout_state(
+    connection: sqlite3.Connection,
+    *,
+    source_ids: set[str] | None = None,
+    currency: str | None = None,
+) -> dict[str, Any]:
+    """Read one consistent persisted FinancialEventGroup payout snapshot."""
+    tables = {row[0] for row in connection.execute(
+        "select name from sqlite_master where type='table'"
+    )}
+    required = {
+        "amazon_financial_event_group_state",
+        "amazon_financial_event_group_sync_state",
+    }
+    if not required <= tables:
+        raise ValueError("DATA_PIPELINE_ERROR: canonical payout tables are missing.")
+    if source_ids is None:
+        source_ids = {
+            str(row[0]) for row in connection.execute(
+                "select source_id from amazon_financial_event_group_state "
+                "union select source_id from amazon_financial_event_group_sync_state"
+            )
+        }
+    selected_sources = sorted(source_ids)
+    selected_currency = str(currency or "").strip().upper() or None
+    source_filter = " or ".join("source_id=?" for _ in selected_sources) or "0"
+    params: list[Any] = list(selected_sources)
+    rows = connection.execute(
+        f"select * from amazon_financial_event_group_state where ({source_filter})"
+        + (" and currency=?" if selected_currency else "")
+        + " order by source_id, financial_event_group_id",
+        (*params, *((selected_currency,) if selected_currency else ())),
+    ).fetchall()
+    markers = {
+        str(row["source_id"]): row
+        for row in connection.execute(
+            f"select * from amazon_financial_event_group_sync_state where ({source_filter})",
+            params,
+        )
+    }
+    uninitialized = [source_id for source_id in selected_sources if not markers.get(source_id) or not markers[source_id]["initialized"]]
+    classification_counts = {classification: 0 for classification in CANONICAL_PAYOUT_CLASSIFICATIONS}
+    for row in rows:
+        classification_counts[str(row["classification"])] = classification_counts.get(str(row["classification"]), 0) + 1
+    payouts = [
+        {
+            "financial_event_group_id": str(row["financial_event_group_id"]),
+            "source_id": str(row["source_id"]),
+            "currency": str(row["currency"]),
+            "amount": str(Decimal(row["original_total"])),
+            "fund_transfer_date": row["fund_transfer_date"],
+            "retrieved_at": row["retrieved_at"],
+            "classification": str(row["classification"]),
+        }
+        for row in rows
+        if row["classification"] == "COMPLETED_PAYOUT"
+        and row["included_as_completed_payout"]
+    ]
+    completed_total = sum((Decimal(item["amount"]) for item in payouts), Decimal("0"))
+    availability = (
+        "DATA_UNAVAILABLE" if uninitialized
+        else "DATA_AVAILABLE" if payouts
+        else "DATA_AVAILABLE_EMPTY"
+    )
+    marker_values = [markers[source_id] for source_id in selected_sources if source_id in markers]
+    snapshot_seed = {
+        "sources": selected_sources,
+        "currency": selected_currency,
+        "markers": [
+            (str(row["source_id"]), row["last_successful_run_id"], row["last_successful_sync_at"])
+            for row in marker_values
+        ],
+        "groups": [
+            (str(row["source_id"]), str(row["financial_event_group_id"]), str(row["fingerprint"]))
+            for row in rows
+        ],
+    }
+    return {
+        "availability": availability,
+        "status": availability,
+        "reason": "CANONICAL_PAYOUT_STATE_NOT_INITIALIZED" if uninitialized else None,
+        "uninitialized_source_ids": uninitialized,
+        "financial_event_group_snapshot_id": hashlib.sha256(
+            json.dumps(snapshot_seed, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "financial_group_retrieved_at": max(
+            [str(row["retrieved_at"]) for row in rows]
+            + [str(row["last_successful_sync_at"] or row["retrieved_at"]) for row in marker_values],
+            default=None,
+        ),
+        "source_sync_run_id": marker_values[0]["last_successful_run_id"] if len(marker_values) == 1 else None,
+        "source_id": selected_sources[0] if len(selected_sources) == 1 else None,
+        "currency": selected_currency,
+        "completed_payout_count": len(payouts),
+        "completed_payout_total": str(completed_total),
+        "completed_payouts": payouts,
+        "classification_counts": classification_counts,
+    }
 
 
 class AmazonIntegrationManager:
@@ -823,6 +928,16 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                         last_successful_run_id=excluded.last_successful_run_id,
                         retrieved_at=excluded.retrieved_at""",
                 (source_id, retrieved_at.isoformat(), source_sync_run_id, retrieved_at.isoformat()),
+            )
+
+    def get_canonical_payout_state(
+        self, source_id: str, currency: str | None = None,
+    ) -> dict[str, Any]:
+        """Return persisted payout state without contacting Amazon."""
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            return read_canonical_payout_state(
+                connection, source_ids={source_id}, currency=currency,
             )
 
     def financial_snapshot_metadata(self, source_id: str) -> dict[str, str | int | None]:

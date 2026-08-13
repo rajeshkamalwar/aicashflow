@@ -34,6 +34,7 @@ from ai_cashflow.models import (
     ReconciliationResult,
 )
 from ai_cashflow.reconciliation import reconcile_payouts
+from ai_cashflow.integrations import read_canonical_payout_state
 
 
 @dataclass(frozen=True)
@@ -195,25 +196,20 @@ def _load_canonical_report_inputs(database_path: str | Path) -> dict[str, object
             where included_in_totals=1 and conflict=0 order by posted_date, transaction_id""").fetchall()
         transactions = [_canonical_transaction(row) for row in rows]
         receipts = [BankReceipt(receipt_id=row["receipt_id"], bank_account=row["bank_account"], currency=row["currency"], receipt_date=datetime.fromisoformat(row["receipt_date"]).date(), amount=Decimal(row["amount"]), reference=row["reference"]) for row in connection.execute("select receipt_id, bank_account, currency, receipt_date, amount, reference from bank_receipts")]
-        payouts = [ExpectedPayout(payout_id=row["financial_event_group_id"], entity="Amazon", marketplace="Amazon", currency=row["currency"], expected_date=datetime.fromisoformat(str(row["fund_transfer_date"] or row["retrieved_at"])[:10]).date(), amount=Decimal(row["original_total"]), reference=row["financial_event_group_id"], source_id=row["source_id"]) for row in connection.execute("select * from amazon_financial_event_group_state where classification='COMPLETED_PAYOUT' and included_as_completed_payout=1")]
         source_ids = {str(row["source_id"]) for row in rows}
-        initialized_source_ids = {
-            str(row["source_id"])
-            for row in connection.execute(
-                "select source_id from amazon_financial_event_group_sync_state where initialized=1"
+        payout_state = read_canonical_payout_state(connection, source_ids=source_ids)
+        payouts = [
+            ExpectedPayout(
+                payout_id=str(row["financial_event_group_id"]), entity="Amazon",
+                marketplace="Amazon", currency=str(row["currency"]),
+                expected_date=datetime.fromisoformat(str(
+                    row["fund_transfer_date"] or row["retrieved_at"]
+                )[:10]).date(),
+                amount=Decimal(str(row["amount"])), reference=str(row["financial_event_group_id"]),
+                source_id=str(row["source_id"]),
             )
-        }
-        uninitialized_source_ids = sorted(source_ids - initialized_source_ids)
-        if uninitialized_source_ids:
-            payout_availability = {
-                "status": "DATA_UNAVAILABLE",
-                "reason": "CANONICAL_PAYOUT_STATE_NOT_INITIALIZED",
-                "uninitialized_source_ids": uninitialized_source_ids,
-            }
-        elif payouts:
-            payout_availability = {"status": "DATA_AVAILABLE", "reason": None}
-        else:
-            payout_availability = {"status": "DATA_AVAILABLE_EMPTY", "reason": None}
+            for row in payout_state["completed_payouts"]
+        ]
         transaction_snapshot = connection.execute("select max(retrieved_at) from amazon_transaction_state").fetchone()[0]
         financial_snapshot = connection.execute("select max(retrieved_at) from amazon_financial_event_group_state").fetchone()[0]
         metadata = {
@@ -224,7 +220,7 @@ def _load_canonical_report_inputs(database_path: str | Path) -> dict[str, object
                 for row in rows
             ).encode()).hexdigest(),
             "bank_receipts": {"count": len(receipts), "status": "DATA_AVAILABLE" if receipts else "DATA_UNAVAILABLE", "reason": None if receipts else "NO_BANK_RECEIPTS_IMPORTED"},
-            "canonical_payouts": payout_availability,
+            "canonical_payouts": payout_state,
         }
     finally:
         connection.close()
@@ -246,8 +242,8 @@ def _canonical_transaction(row: sqlite3.Row) -> AmazonTransaction:
 def _write_report_metadata(path: Path, source_mode: str, transactions: list[AmazonTransaction], receipts: list[BankReceipt], canonical: dict[str, object] | None = None) -> None:
     snapshot = hashlib.sha256("|".join(f"{t.source_id}:{t.settlement_id}:{t.status}" for t in transactions).encode()).hexdigest()
     dates = sorted(t.posted_at for t in transactions if t.posted_at)
-    payout_availability = (canonical or {}).get("canonical_payouts", {"status": "DATA_AVAILABLE_EMPTY", "reason": None})
-    path.write_text(json.dumps({"report_snapshot_id": snapshot, "source_mode": source_mode, "generated_at": datetime.now(timezone.utc).isoformat(), "transaction_count": len(transactions), "observed_start": dates[0] if dates else None, "observed_end": dates[-1] if dates else None, "bank_receipts": (canonical or {}).get("bank_receipts", {"count": len(receipts), "status": "DATA_AVAILABLE" if receipts else "DATA_UNAVAILABLE", "reason": None if receipts else "NO_BANK_RECEIPTS_IMPORTED"}), "calculation_engine": "CALCULATION_VALID", "marketplace_transaction_data": "DATA_PARTIAL", "completed_payout_data": payout_availability["status"], "reconciliation_state": "BANK_RECONCILIATION_NOT_AVAILABLE" if not receipts else "RECONCILIATION_PENDING", **(canonical or {})}, indent=2), encoding="utf-8")
+    payout_availability = (canonical or {}).get("canonical_payouts", {"availability": "DATA_AVAILABLE_EMPTY", "reason": None})
+    path.write_text(json.dumps({"report_snapshot_id": snapshot, "source_mode": source_mode, "generated_at": datetime.now(timezone.utc).isoformat(), "transaction_count": len(transactions), "observed_start": dates[0] if dates else None, "observed_end": dates[-1] if dates else None, "bank_receipts": (canonical or {}).get("bank_receipts", {"count": len(receipts), "status": "DATA_AVAILABLE" if receipts else "DATA_UNAVAILABLE", "reason": None if receipts else "NO_BANK_RECEIPTS_IMPORTED"}), "calculation_engine": "CALCULATION_VALID", "marketplace_transaction_data": "DATA_PARTIAL", "completed_payout_data": payout_availability["availability"], "reconciliation_state": "BANK_RECONCILIATION_NOT_AVAILABLE" if not receipts else "RECONCILIATION_PENDING", **(canonical or {})}, indent=2), encoding="utf-8")
 
 
 def _validate_source_files(source_files: SourceFiles) -> list[DataQualityIssue]:

@@ -724,6 +724,19 @@ def phase0_amazon_financial_position(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.get("/phase0/amazon/canonical-payout-state", response_model=dict[str, object])
+def phase0_amazon_canonical_payout_state(
+    source_id: str,
+    currency: str | None = None,
+    _: None = Depends(require_api_key),
+    service: Phase0Service = Depends(get_phase0_service),
+) -> dict[str, object]:
+    try:
+        return service.get_canonical_payout_state(source_id, currency)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/phase0/seller-central/statement", response_model=dict[str, object])
 def phase0_seller_central_statement(
     _: Principal = Depends(require_administrator),

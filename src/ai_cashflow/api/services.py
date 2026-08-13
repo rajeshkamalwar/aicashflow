@@ -118,6 +118,17 @@ class Phase0Service:
         self._record_run("generated")
         return ReportRunResult(status="generated", reports_dir=reports_dir)
 
+    def get_canonical_payout_state(
+        self, source_id: str, currency: str | None = None,
+    ) -> dict[str, object]:
+        """Read persisted canonical payouts without refreshing Amazon."""
+        master_key = os.getenv("AI_CASHFLOW_MASTER_KEY", "")
+        if not master_key:
+            raise ValueError("The integration encryption key has not been provisioned.")
+        return AmazonSourceRegistry(
+            self.config.database_path, master_key,
+        ).get_canonical_payout_state(source_id, currency)
+
     def get_summary(self) -> Phase0Summary:
         summary_path = self.config.reports_dir / "cfo_summary.md"
         if not summary_path.exists():
