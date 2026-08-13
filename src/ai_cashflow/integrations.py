@@ -849,6 +849,18 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                        lock_run_id TEXT
                    )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS seller_central_statement_snapshots (
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL, marketplace_id TEXT NOT NULL, currency TEXT NOT NULL,
+                    observed_at TEXT NOT NULL, standard_orders TEXT, deferred_transactions TEXT, all_accounts TEXT,
+                    funds_available TEXT, account_level_reserve TEXT, recent_payout TEXT, evidence_reference TEXT,
+                    notes TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+                    source_type TEXT NOT NULL CHECK (source_type='SELLER_CENTRAL_REPORTED'),
+                    FOREIGN KEY (source_id) REFERENCES amazon_sources(id) ON DELETE RESTRICT
+                )"""
+            )
+            connection.execute("""CREATE INDEX IF NOT EXISTS seller_central_statement_snapshot_scope_idx
+                ON seller_central_statement_snapshots (source_id, marketplace_id, currency, observed_at DESC, created_at DESC)""")
 
     def _source_row(self, source_id: str) -> sqlite3.Row:
         with self._connect() as connection:
@@ -960,6 +972,53 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             "transaction_snapshot_id": transaction["run_id"] if transaction else None,
             "transaction_snapshot_retrieved_at": transaction["completed_at"] if transaction else None,
         }
+
+    def create_seller_central_statement_snapshot(self, values: Mapping[str, Any], created_by: str) -> dict[str, Any]:
+        """Append an operator-entered Seller Central statement snapshot; never overwrite one."""
+        source_id = str(values["source_id"])
+        marketplace_id = str(values["marketplace_id"])
+        currency = str(values["currency"]).upper()
+        source = self._source_row(source_id)
+        marketplaces = json.loads(source["marketplaces_json"])
+        match = next((row for row in marketplaces if str(row.get("id")) == marketplace_id), None)
+        if not match:
+            raise ValueError("The marketplace does not belong to the selected Amazon source.")
+        if str(match.get("currency") or "").upper() != currency:
+            raise ValueError("Snapshot currency must match the selected marketplace native currency.")
+        snapshot_id = uuid4().hex
+        now = _utc_now()
+        money_fields = ("standard_orders", "deferred_transactions", "all_accounts", "funds_available", "account_level_reserve", "recent_payout")
+        normalized = {field: (str(Decimal(str(values[field]))) if values.get(field) is not None else None) for field in money_fields}
+        with self._connect() as connection:
+            connection.execute("""INSERT INTO seller_central_statement_snapshots
+                (id,source_id,marketplace_id,currency,observed_at,standard_orders,deferred_transactions,all_accounts,funds_available,account_level_reserve,recent_payout,evidence_reference,notes,created_by,created_at,source_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'SELLER_CENTRAL_REPORTED')""",
+                (snapshot_id,source_id,marketplace_id,currency,str(values["observed_at"]),*(normalized[field] for field in money_fields),values.get("evidence_reference"),values.get("notes"),created_by,now))
+        return self._statement_snapshot(snapshot_id, include_notes=True)
+
+    def _statement_snapshot(self, snapshot_id: str, *, include_notes: bool = False) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM seller_central_statement_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        if row is None:
+            raise ValueError("Statement snapshot not found.")
+        result = dict(row)
+        if not include_notes:
+            result.pop("notes", None)
+            result.pop("evidence_reference", None)
+        return result
+
+    def latest_seller_central_statement_snapshot(self, source_id: str, marketplace_id: str, currency: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("""SELECT * FROM seller_central_statement_snapshots WHERE source_id=? AND marketplace_id=? AND currency=?
+                ORDER BY observed_at DESC, created_at DESC LIMIT 1""", (source_id, marketplace_id, currency.upper())).fetchone()
+        if row is None: return None
+        result = dict(row); result.pop("notes", None); result.pop("evidence_reference", None); return result
+
+    def list_seller_central_statement_snapshots(self, source_id: str, marketplace_id: str, currency: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT * FROM seller_central_statement_snapshots WHERE source_id=? AND marketplace_id=? AND currency=?
+                ORDER BY observed_at DESC, created_at DESC LIMIT ?""", (source_id, marketplace_id, currency.upper(), max(1, min(limit, 100)))).fetchall()
+        return [{key: value for key, value in dict(row).items() if key not in {"notes", "evidence_reference"}} for row in rows]
 
     def upsert(
         self, values: Mapping[str, Any], source_id: str | None = None

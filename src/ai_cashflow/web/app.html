@@ -93,6 +93,7 @@
             <div class="account-balance-row total"><span>All Accounts</span><strong id="account-balance-all-accounts">Unavailable</strong><em id="account-balance-all-coverage" class="coverage-badge" hidden>Partial coverage</em></div>
             <small id="account-balance-all-accounts-note" class="account-balance-row-note">Requires the authoritative Amazon Deferred transactions balance.</small>
             <div class="account-balance-row funds"><span>Funds Available</span><strong id="account-balance-funds">Unavailable</strong></div>
+            <div class="account-balance-row"><span>Account Level Reserve</span><strong id="account-balance-reserve">Unavailable</strong></div>
           </div>
           <small id="account-balance-funds-note">Amazon has not supplied an authoritative funds-available value through the current API source.</small>
         </section>
@@ -481,6 +482,14 @@
               <span id="settings-save-status" class="muted"></span>
               <button id="save-settings" type="submit" class="run-button inline">Save Configuration</button>
             </div>
+          </form>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><h2>Seller Central Statement Snapshot</h2><span>Admin only · copied from Seller Central Statement View</span></div>
+          <form id="seller-central-snapshot-form" class="form-grid compact">
+            <label>Source<select name="source_id" id="statement-source" required></select></label><label>Marketplace<select name="marketplace_id" id="statement-marketplace" required></select></label><label>Currency<input name="currency" id="statement-currency" maxlength="3" required></label><label>Observed at<input name="observed_at" type="datetime-local" required></label>
+            <label>Standard orders<input name="standard_orders" inputmode="decimal"></label><label>Deferred transactions<input name="deferred_transactions" inputmode="decimal"></label><label>All Accounts<input name="all_accounts" inputmode="decimal"></label><label>Funds Available<input name="funds_available" inputmode="decimal"></label><label>Account Level Reserve<input name="account_level_reserve" inputmode="decimal"></label><label>Recent Payout<input name="recent_payout" inputmode="decimal"></label><label>Notes<textarea name="notes"></textarea></label>
+            <button type="submit">Save Snapshot</button><small id="seller-central-snapshot-status" role="status"></small>
           </form>
         </section>
       </section>

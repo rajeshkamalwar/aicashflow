@@ -1,6 +1,7 @@
 """API response schemas."""
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -70,3 +71,18 @@ class AmazonTransactionBackfillCreate(BaseModel):
     overall_start: datetime
     overall_end: datetime
     slice_hours: int = Field(default=24, ge=1, le=720)
+
+
+class SellerCentralStatementSnapshotCreate(BaseModel):
+    source_id: str = Field(min_length=1, max_length=64)
+    marketplace_id: str = Field(min_length=1, max_length=64)
+    currency: str = Field(min_length=3, max_length=3)
+    observed_at: datetime
+    standard_orders: Decimal | None = None
+    deferred_transactions: Decimal | None = None
+    all_accounts: Decimal | None = None
+    funds_available: Decimal | None = None
+    account_level_reserve: Decimal | None = None
+    recent_payout: Decimal | None = None
+    evidence_reference: str | None = Field(default=None, max_length=500)
+    notes: str | None = Field(default=None, max_length=2000)

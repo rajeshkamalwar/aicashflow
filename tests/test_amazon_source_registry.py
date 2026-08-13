@@ -54,6 +54,27 @@ class AmazonSourceRegistryTests(unittest.TestCase):
 
             self.assertEqual(registry.credentials(source["id"]).refresh_token, "token")
 
+    def test_statement_snapshots_are_append_only_decimal_safe_and_currency_scoped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = self.make_registry(Path(temp_dir))
+            source = registry.upsert({"name": "CA", "client_id": "id", "client_secret": "secret", "refresh_token": "token"})
+            with registry._connect() as connection:
+                connection.execute("UPDATE amazon_sources SET marketplaces_json=? WHERE id=?", ('[{"id":"ca","currency":"CAD"}]', source["id"]))
+            first = registry.create_seller_central_statement_snapshot({
+                "source_id": source["id"], "marketplace_id": "ca", "currency": "cad",
+                "observed_at": "2026-08-13T10:00:00Z", "deferred_transactions": "1.2300", "account_level_reserve": "-2.50",
+            }, "admin")
+            second = registry.create_seller_central_statement_snapshot({
+                "source_id": source["id"], "marketplace_id": "ca", "currency": "CAD",
+                "observed_at": "2026-08-13T10:01:00Z", "funds_available": "3.40",
+            }, "admin")
+            latest = registry.latest_seller_central_statement_snapshot(source["id"], "ca", "CAD")
+            self.assertNotEqual(first["id"], second["id"])
+            self.assertEqual(first["deferred_transactions"], "1.2300")
+            self.assertEqual(first["account_level_reserve"], "-2.50")
+            self.assertEqual(latest["id"], second["id"])
+            self.assertNotIn("notes", latest)
+
     def test_connection_test_records_only_safe_payment_marketplace_identity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             registry = self.make_registry(Path(temp_dir))

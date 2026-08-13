@@ -12,6 +12,7 @@ from ai_cashflow.api.schemas import (
     AmazonIntegrationUpdate,
     AmazonSourceUpdate,
     AmazonTransactionBackfillCreate,
+    SellerCentralStatementSnapshotCreate,
     HealthResponse,
     Phase0SummaryResponse,
     RunReportResponse,
@@ -722,6 +723,34 @@ def phase0_amazon_financial_position(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AmazonSpApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/admin/seller-central/statement-snapshots", response_model=dict[str, object])
+def create_seller_central_statement_snapshot(
+    payload: SellerCentralStatementSnapshotCreate,
+    principal: Principal = Depends(require_administrator),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    try:
+        return registry.create_seller_central_statement_snapshot(payload.model_dump(), principal.username)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/phase0/seller-central/statement-snapshots/latest", response_model=dict[str, object])
+def latest_seller_central_statement_snapshot(
+    source_id: str, marketplace_id: str, currency: str,
+    _: None = Depends(require_api_key), registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    return {"snapshot": registry.latest_seller_central_statement_snapshot(source_id, marketplace_id, currency)}
+
+
+@router.get("/admin/seller-central/statement-snapshots", response_model=list[dict[str, object]])
+def seller_central_statement_snapshot_history(
+    source_id: str, marketplace_id: str, currency: str,
+    _: Principal = Depends(require_administrator), registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> list[dict[str, object]]:
+    return registry.list_seller_central_statement_snapshots(source_id, marketplace_id, currency)
 
 
 @router.get("/phase0/amazon/canonical-payout-state", response_model=dict[str, object])

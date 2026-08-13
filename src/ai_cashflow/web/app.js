@@ -61,6 +61,35 @@ let _isBackgroundSyncing = false;
 let _selectedSourceSyncing = false;
 const _financialPositionRequests = new Map();
 
+function configureStatementSnapshotForm() {
+  const form = document.getElementById("seller-central-snapshot-form");
+  if (!form) return;
+  const source = document.getElementById("statement-source");
+  const marketplace = document.getElementById("statement-marketplace");
+  const currency = document.getElementById("statement-currency");
+  const populate = () => {
+    const selected = (state.amazonSources || []).find((row) => row.id === source.value);
+    marketplace.innerHTML = (selected?.marketplaces || []).map((row) => `<option value="${escapeAttribute(row.id)}" data-currency="${escapeAttribute(row.currency || "")}">${escapeHtml(row.name || row.id)}</option>`).join("");
+    currency.value = marketplace.selectedOptions[0]?.dataset.currency || "";
+  };
+  source.innerHTML = (state.amazonSources || []).map((row) => `<option value="${escapeAttribute(row.id)}">${escapeHtml(row.name)}</option>`).join("");
+  source.onchange = populate;
+  marketplace.onchange = () => { currency.value = marketplace.selectedOptions[0]?.dataset.currency || ""; };
+  populate();
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(form));
+    for (const key of ["standard_orders", "deferred_transactions", "all_accounts", "funds_available", "account_level_reserve", "recent_payout", "notes"]) if (!body[key]) body[key] = null;
+    body.currency = String(body.currency).toUpperCase(); body.observed_at = new Date(body.observed_at).toISOString();
+    const status = document.getElementById("seller-central-snapshot-status");
+    try {
+      const saved = await fetchJson("/admin/seller-central/statement-snapshots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      status.textContent = `Snapshot saved · ${saved.currency} · observed ${String(saved.observed_at).slice(0, 19).replace("T", " ")} UTC`;
+      await loadAmazonFinancialPosition(state.filters.sourceId); render();
+    } catch (error) { status.textContent = error.message || "Snapshot was not saved."; }
+  };
+}
+
 function hasApiSources() {
   return (state.amazonSources || []).some((source) => source.enabled);
 }
@@ -374,6 +403,10 @@ async function loadAmazonFinancialPosition(sourceId = state.filters.sourceId) {
     position = await fetchJson(
       `/phase0/amazon/financial-position?source_id=${encodeURIComponent(sourceId)}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}${snapshotId ? `&snapshot_id=${encodeURIComponent(snapshotId)}` : ""}`
     );
+    if (currency && position?.marketplace_id) {
+      const manual = await fetchJson(`/phase0/seller-central/statement-snapshots/latest?source_id=${encodeURIComponent(sourceId)}&marketplace_id=${encodeURIComponent(position.marketplace_id)}&currency=${encodeURIComponent(currency)}`);
+      position.seller_central_statement_snapshot = manual.snapshot || null;
+    }
   } catch (error) {
     position = {
       status: "unavailable",
@@ -950,6 +983,7 @@ function sourceFreshness(source) {
 }
 
 function renderScopeControls() {
+  configureStatementSnapshotForm();
   const sourceSelect = document.getElementById("global-source-filter");
   const currencySelect = document.getElementById("global-currency-filter");
   const periodSelect = document.getElementById("global-period-filter");
@@ -1111,6 +1145,7 @@ function renderAccountBalanceSummary(position) {
   const deferredEl = document.getElementById("account-balance-deferred");
   const allAccountsEl = document.getElementById("account-balance-all-accounts");
   const fundsEl = document.getElementById("account-balance-funds");
+  const reserveEl = document.getElementById("account-balance-reserve");
   const deferredBadge = document.getElementById("account-balance-deferred-coverage");
   const allAccountsBadge = document.getElementById("account-balance-all-coverage");
   const snapshotEl = document.getElementById("account-balance-snapshot");
@@ -1125,6 +1160,7 @@ function renderAccountBalanceSummary(position) {
     deferredEl.textContent = "Unavailable";
     allAccountsEl.textContent = "Unavailable";
     fundsEl.textContent = "Unavailable";
+    reserveEl.textContent = "Unavailable";
     snapshotEl.textContent = selectedSourceId && !selectedCurrency
       ? "Select a native currency to view a financial snapshot."
       : "Select one source and native currency to view a financial snapshot.";
@@ -1136,6 +1172,19 @@ function renderAccountBalanceSummary(position) {
   standardEl.textContent = hasStandard ? formatNativeAmount(selectedCurrency, standard.amount) : "Unavailable";
   deferredEl.textContent = "Unavailable";
   allAccountsEl.textContent = "Unavailable";
+  reserveEl.textContent = "Unavailable";
+  const manual = position.seller_central_statement_snapshot;
+  const observed = manual?.observed_at ? new Date(manual.observed_at) : null;
+  const age = observed && !Number.isNaN(observed.getTime()) ? Date.now() - observed.getTime() : Infinity;
+  const freshness = age <= 30 * 60 * 1000 ? "FRESH" : age <= 24 * 60 * 60 * 1000 ? "STALE" : "EXPIRED";
+  const manualValue = (field, target) => {
+    if (!manual || freshness === "EXPIRED" || manual[field] === null || manual[field] === undefined) return false;
+    target.textContent = formatNativeAmount(selectedCurrency, manual[field]);
+    return true;
+  };
+  const hasManualDeferred = manualValue("deferred_transactions", deferredEl);
+  const hasManualAll = manualValue("all_accounts", allAccountsEl);
+  manualValue("account_level_reserve", reserveEl);
 
   const fundsAvailable = financialValues(position, "FUNDS_AVAILABLE").find((value) => (
     value.currency === selectedCurrency && value.amount !== null && value.isAuthoritative === true
@@ -1146,7 +1195,14 @@ function renderAccountBalanceSummary(position) {
   if (fundsAvailable) {
     fundsNote.textContent = `${fundsAvailable.sourceField || "Amazon SP-API"} · authoritative Amazon-reported value`;
   }
-  snapshotEl.textContent = `Snapshot ${position.snapshot_id} · ${selectedCurrency} · updated ${String(position.snapshot_created_at || position.as_of || "Unavailable").slice(0, 19).replace("T", " ")} UTC`;
+  if (!fundsAvailable && manualValue("funds_available", fundsEl)) fundsNote.textContent = `Seller Central reported · ${freshness} · observed ${String(manual.observed_at).slice(0, 19).replace("T", " ")} UTC`;
+  if (manual && freshness !== "EXPIRED") {
+    if (hasManualDeferred) deferredBadge.hidden = false;
+    if (hasManualAll) allAccountsBadge.hidden = false;
+    snapshotEl.textContent = `Seller Central reported · ${freshness} · observed ${String(manual.observed_at).slice(0, 19).replace("T", " ")} UTC · statement snapshot ${manual.id}`;
+  } else if (manual) {
+    snapshotEl.textContent = "Seller Central statement snapshot expired · refresh required.";
+  } else snapshotEl.textContent = `Snapshot ${position.snapshot_id} · ${selectedCurrency} · updated ${String(position.snapshot_created_at || position.as_of || "Unavailable").slice(0, 19).replace("T", " ")} UTC`;
 }
 
 function renderTransactionVisibility(position) {
