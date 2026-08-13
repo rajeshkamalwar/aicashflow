@@ -116,6 +116,9 @@ class ApiAppTests(unittest.TestCase):
         self.assertIn("state.filters.currency", app_js)
         self.assertIn("position.currency_scope === selectedCurrency", app_js)
         self.assertIn('financialValues(position, "FUNDS_AVAILABLE")', app_js)
+        self.assertIn("function addNativeAmounts(left, right)", app_js)
+        self.assertIn("BigInt(digits)", app_js)
+        self.assertNotIn("moneyNumber(standard.amount) + moneyNumber(deferredAmount)", app_js)
         self.assertNotIn('renderAvailability(position, "RESERVE_ADJUSTED_FUNDS", "account-balance', app_js)
 
     def test_settlement_status_uses_the_financial_position_group_count(self):

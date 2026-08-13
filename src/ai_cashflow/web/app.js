@@ -1065,6 +1065,38 @@ function renderAvailability(position, type, cashId, noteId, fallback) {
   setText(noteId, unavailableFinancialValue(position, type, fallback));
 }
 
+function nativeDecimalParts(value) {
+  const match = String(value ?? "").trim().match(/^(-?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return null;
+  return { negative: match[1] === "-", whole: match[2], fraction: match[3] || "" };
+}
+
+function addNativeAmounts(left, right) {
+  const leftParts = nativeDecimalParts(left);
+  const rightParts = nativeDecimalParts(right);
+  if (!leftParts || !rightParts) return null;
+  const scale = Math.max(leftParts.fraction.length, rightParts.fraction.length);
+  const toMinorUnits = (parts) => {
+    const digits = `${parts.whole}${parts.fraction.padEnd(scale, "0")}`;
+    const amount = BigInt(digits);
+    return parts.negative ? -amount : amount;
+  };
+  const total = toMinorUnits(leftParts) + toMinorUnits(rightParts);
+  const negative = total < 0n ? "-" : "";
+  const digits = (total < 0n ? -total : total).toString().padStart(scale + 1, "0");
+  return scale
+    ? `${negative}${digits.slice(0, -scale)}.${digits.slice(-scale)}`
+    : `${negative}${digits}`;
+}
+
+function formatNativeAmount(currency, value) {
+  const parts = nativeDecimalParts(value);
+  if (!parts) return "Unavailable";
+  const whole = parts.whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fraction = parts.fraction.padEnd(2, "0");
+  return `${currency} ${parts.negative ? "-" : ""}${whole}.${fraction}`;
+}
+
 function renderAccountBalanceSummary(position) {
   const selectedSourceId = state.filters.sourceId;
   const selectedCurrency = state.filters.currency;
@@ -1108,15 +1140,15 @@ function renderAccountBalanceSummary(position) {
   const deferredIsPartial = Boolean(deferred) && !(coverage.is_historically_complete ?? coverage.is_complete);
   const hasStandard = standard?.amount !== null && standard?.amount !== undefined;
   const hasDeferred = deferredAmount !== null && deferredAmount !== undefined;
-  standardEl.textContent = hasStandard ? formatPositionAmount(selectedCurrency, standard.amount) : "Unavailable";
-  deferredEl.textContent = hasDeferred ? formatPositionAmount(selectedCurrency, deferredAmount) : "Unavailable";
+  standardEl.textContent = hasStandard ? formatNativeAmount(selectedCurrency, standard.amount) : "Unavailable";
+  deferredEl.textContent = hasDeferred ? formatNativeAmount(selectedCurrency, deferredAmount) : "Unavailable";
   deferredBadge.hidden = !deferredIsPartial;
 
   if (hasStandard && hasDeferred) {
-    allAccountsEl.textContent = formatPositionAmount(
-      selectedCurrency,
-      moneyNumber(standard.amount) + moneyNumber(deferredAmount),
-    );
+    const allAccounts = addNativeAmounts(standard.amount, deferredAmount);
+    allAccountsEl.textContent = allAccounts === null
+      ? "Unavailable"
+      : formatNativeAmount(selectedCurrency, allAccounts);
     allAccountsBadge.hidden = !deferredIsPartial;
   } else {
     allAccountsEl.textContent = "Unavailable";
@@ -1126,7 +1158,7 @@ function renderAccountBalanceSummary(position) {
     value.currency === selectedCurrency && value.amount !== null && value.isAuthoritative === true
   ));
   fundsEl.textContent = fundsAvailable
-    ? formatPositionAmount(selectedCurrency, fundsAvailable.amount)
+    ? formatNativeAmount(selectedCurrency, fundsAvailable.amount)
     : "Unavailable";
   if (fundsAvailable) {
     fundsNote.textContent = `${fundsAvailable.sourceField || "Amazon SP-API"} · authoritative Amazon-reported value`;
