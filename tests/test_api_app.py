@@ -100,6 +100,24 @@ class ApiAppTests(unittest.TestCase):
         self.assertIn('const enabled = Boolean(position?.transaction_visibility_enabled);', content)
         self.assertIn('if (!enabled) return;', content)
 
+    def test_account_balance_summary_is_snapshot_and_currency_scoped(self):
+        web_root = Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web"
+        app_js = (web_root / "app.js").read_text(encoding="utf-8")
+        app_html = (web_root / "app.html").read_text(encoding="utf-8")
+
+        self.assertIn("Account Balance", app_html)
+        self.assertIn("Standard orders", app_html)
+        self.assertIn("Deferred transactions", app_html)
+        self.assertIn("All Accounts", app_html)
+        self.assertIn("Funds Available", app_html)
+        self.assertIn("Amazon has not supplied an authoritative funds-available value through the current API source.", app_html)
+        self.assertIn("renderAccountBalanceSummary(position)", app_js)
+        self.assertIn("position.snapshot_id", app_js)
+        self.assertIn("state.filters.currency", app_js)
+        self.assertIn("position.currency_scope === selectedCurrency", app_js)
+        self.assertIn('financialValues(position, "FUNDS_AVAILABLE")', app_js)
+        self.assertNotIn('renderAvailability(position, "RESERVE_ADJUSTED_FUNDS", "account-balance', app_js)
+
     def test_settlement_status_uses_the_financial_position_group_count(self):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
 

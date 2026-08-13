@@ -443,6 +443,42 @@ nav {
   margin-bottom: 16px;
 }
 
+.account-balance-summary {
+  margin-bottom: 16px;
+  padding: 20px 22px;
+  border: 1px solid #b9d9d6;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f4fbfa, #ffffff 62%);
+  box-shadow: 0 10px 26px rgba(8, 127, 122, .08);
+}
+
+.account-balance-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.account-balance-heading h2 { margin: 2px 0 0; font-size: 20px; }
+.account-balance-heading > small { max-width: 430px; color: var(--muted); text-align: right; }
+.account-balance-rows { display: grid; }
+.account-balance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  border-top: 1px solid rgba(196, 207, 218, .8);
+}
+.account-balance-row > span { font-weight: 650; }
+.account-balance-row strong { font-family: var(--font-num); font-size: 17px; text-align: right; }
+.account-balance-row.total { border-top: 2px solid var(--line-strong); }
+.account-balance-row.total > span,
+.account-balance-row.total strong { font-size: 18px; font-weight: 800; }
+.account-balance-row.funds { margin-top: 6px; border-top-color: transparent; }
+.account-balance-summary > small { display: block; color: var(--muted); }
+
 [hidden] { display: none !important; }
 
 .overview-availability-grid {
@@ -3779,6 +3815,8 @@ input[type="color"] {
 }
 
 @media (max-width: 760px) {
+  .account-balance-heading { display: grid; }
+  .account-balance-heading > small { text-align: left; }
   .overview-financial-grid,
   .overview-availability-grid,
   .source-status-grid {

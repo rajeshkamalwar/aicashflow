@@ -181,8 +181,12 @@ for (const [id, key] of [
     state.filters[key] = event.target.value;
     if (key === "sourceId") {
       state.filters.currency = "";
+      state.amazonFinancialPosition = null;
+      render();
       await loadAmazonFinancialPosition();
     } else if (key === "currency") {
+      state.amazonFinancialPosition = null;
+      render();
       await loadAmazonFinancialPosition();
     }
     persistScopeFilters();
@@ -1061,6 +1065,75 @@ function renderAvailability(position, type, cashId, noteId, fallback) {
   setText(noteId, unavailableFinancialValue(position, type, fallback));
 }
 
+function renderAccountBalanceSummary(position) {
+  const selectedSourceId = state.filters.sourceId;
+  const selectedCurrency = state.filters.currency;
+  const isCurrentSnapshot = Boolean(
+    position?.status === "ready"
+    && position.source_id === selectedSourceId
+    && position.snapshot_id
+    && selectedCurrency
+    && position.currency_scope === selectedCurrency
+  );
+  const standardEl = document.getElementById("account-balance-standard");
+  const deferredEl = document.getElementById("account-balance-deferred");
+  const allAccountsEl = document.getElementById("account-balance-all-accounts");
+  const fundsEl = document.getElementById("account-balance-funds");
+  const deferredBadge = document.getElementById("account-balance-deferred-coverage");
+  const allAccountsBadge = document.getElementById("account-balance-all-coverage");
+  const snapshotEl = document.getElementById("account-balance-snapshot");
+  const fundsNote = document.getElementById("account-balance-funds-note");
+  const unavailableFundsNote = "Amazon has not supplied an authoritative funds-available value through the current API source.";
+
+  deferredBadge.hidden = true;
+  allAccountsBadge.hidden = true;
+  fundsNote.textContent = unavailableFundsNote;
+  if (!isCurrentSnapshot) {
+    standardEl.textContent = "Unavailable";
+    deferredEl.textContent = "Unavailable";
+    allAccountsEl.textContent = "Unavailable";
+    fundsEl.textContent = "Unavailable";
+    snapshotEl.textContent = selectedSourceId && !selectedCurrency
+      ? "Select a native currency to view a financial snapshot."
+      : "Select one source and native currency to view a financial snapshot.";
+    return;
+  }
+
+  const standard = nativeOpenBalances(position).find((entry) => entry.currency === selectedCurrency);
+  const visibility = position.transaction_visibility || {};
+  const deferred = visibility.by_currency?.[selectedCurrency]
+    || (visibility.currency === selectedCurrency ? visibility : null);
+  const deferredAmount = deferred?.deferred_amount;
+  const coverage = deferred?.coverage || {};
+  const deferredIsPartial = Boolean(deferred) && !(coverage.is_historically_complete ?? coverage.is_complete);
+  const hasStandard = standard?.amount !== null && standard?.amount !== undefined;
+  const hasDeferred = deferredAmount !== null && deferredAmount !== undefined;
+  standardEl.textContent = hasStandard ? formatPositionAmount(selectedCurrency, standard.amount) : "Unavailable";
+  deferredEl.textContent = hasDeferred ? formatPositionAmount(selectedCurrency, deferredAmount) : "Unavailable";
+  deferredBadge.hidden = !deferredIsPartial;
+
+  if (hasStandard && hasDeferred) {
+    allAccountsEl.textContent = formatPositionAmount(
+      selectedCurrency,
+      moneyNumber(standard.amount) + moneyNumber(deferredAmount),
+    );
+    allAccountsBadge.hidden = !deferredIsPartial;
+  } else {
+    allAccountsEl.textContent = "Unavailable";
+  }
+
+  const fundsAvailable = financialValues(position, "FUNDS_AVAILABLE").find((value) => (
+    value.currency === selectedCurrency && value.amount !== null && value.isAuthoritative === true
+  ));
+  fundsEl.textContent = fundsAvailable
+    ? formatPositionAmount(selectedCurrency, fundsAvailable.amount)
+    : "Unavailable";
+  if (fundsAvailable) {
+    fundsNote.textContent = `${fundsAvailable.sourceField || "Amazon SP-API"} · authoritative Amazon-reported value`;
+  }
+  snapshotEl.textContent = `Snapshot ${position.snapshot_id} · ${selectedCurrency} · updated ${String(position.snapshot_created_at || position.as_of || "Unavailable").slice(0, 19).replace("T", " ")} UTC`;
+}
+
 function renderTransactionVisibility(position) {
   const enabled = Boolean(position?.transaction_visibility_enabled);
   const cards = ["overview-deferred-card", "overview-released-card", "overview-completed-payout-card"];
@@ -1170,6 +1243,9 @@ function renderTreasuryOverview() {
   setText("overview-funds-label", "Funds available after reserve");
   setText("overview-upcoming-label", "Upcoming payout");
   renderTransactionVisibility(
+    position?.source_id === state.filters.sourceId ? position : null
+  );
+  renderAccountBalanceSummary(
     position?.source_id === state.filters.sourceId ? position : null
   );
 

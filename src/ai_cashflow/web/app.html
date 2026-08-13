@@ -78,6 +78,23 @@
       <section id="overview" class="view active">
         <section id="overview-readiness" class="data-confidence-banner" role="status"></section>
 
+        <section id="overview-account-balance-summary" class="account-balance-summary" aria-labelledby="account-balance-heading">
+          <div class="account-balance-heading">
+            <div>
+              <span class="strip-label">Amazon account position</span>
+              <h2 id="account-balance-heading">Account Balance</h2>
+            </div>
+            <small id="account-balance-snapshot">Select one source and native currency to view a financial snapshot.</small>
+          </div>
+          <div class="account-balance-rows">
+            <div class="account-balance-row"><span>Standard orders</span><strong id="account-balance-standard">Unavailable</strong></div>
+            <div class="account-balance-row"><span>Deferred transactions</span><strong id="account-balance-deferred">Unavailable</strong><em id="account-balance-deferred-coverage" class="coverage-badge" hidden>Partial coverage</em></div>
+            <div class="account-balance-row total"><span>All Accounts</span><strong id="account-balance-all-accounts">Unavailable</strong><em id="account-balance-all-coverage" class="coverage-badge" hidden>Partial coverage</em></div>
+            <div class="account-balance-row funds"><span>Funds Available</span><strong id="account-balance-funds">Unavailable</strong></div>
+          </div>
+          <small id="account-balance-funds-note">Amazon has not supplied an authoritative funds-available value through the current API source.</small>
+        </section>
+
         <section class="overview-financial-grid" aria-label="Amazon financial position">
           <article class="command-kpi emphasis open-balance-card">
             <span id="overview-confirmed-label">Amazon-Reported Open Balances</span>
