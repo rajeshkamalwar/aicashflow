@@ -3814,9 +3814,18 @@ input[type="color"] {
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 820px) {
   .account-balance-heading { display: grid; }
   .account-balance-heading > small { max-width: 100%; text-align: left; }
+  .account-balance-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 8px;
+  }
+  .account-balance-row .coverage-badge {
+    grid-column: 2;
+    justify-self: end;
+    margin-left: 0;
+  }
   .overview-financial-grid,
   .overview-availability-grid,
   .source-status-grid {
