@@ -476,6 +476,7 @@ nav {
 .account-balance-row.total { border-top: 2px solid var(--line-strong); }
 .account-balance-row.total > span,
 .account-balance-row.total strong { font-size: 18px; font-weight: 800; }
+.account-balance-row-note { display: block; color: var(--muted); margin: -4px 0 7px; }
 .account-balance-row.funds { margin-top: 6px; border-top-color: transparent; }
 .account-balance-summary > small { display: block; color: var(--muted); }
 

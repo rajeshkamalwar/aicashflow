@@ -121,6 +121,15 @@ class ApiAppTests(unittest.TestCase):
         self.assertNotIn("moneyNumber(standard.amount) + moneyNumber(deferredAmount)", app_js)
         self.assertNotIn('renderAvailability(position, "RESERVE_ADJUSTED_FUNDS", "account-balance', app_js)
 
+    def test_account_balance_does_not_present_api_deferred_as_amazon_statement_deferred(self):
+        app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
+        app_html = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.html").read_text(encoding="utf-8")
+
+        self.assertIn("Authoritative Amazon deferred balance is awaiting reconciliation with the Deferred Transaction Report.", app_html)
+        self.assertIn("Requires the authoritative Amazon Deferred transactions balance.", app_html)
+        self.assertNotIn("const deferred = visibility.by_currency?.[selectedCurrency]", app_js)
+        self.assertNotIn("const deferredAmount = deferred?.deferred_amount;", app_js)
+
     def test_settlement_status_uses_the_financial_position_group_count(self):
         app_js = (Path(__file__).resolve().parents[1] / "src" / "ai_cashflow" / "web" / "app.js").read_text(encoding="utf-8")
 

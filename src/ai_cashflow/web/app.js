@@ -1132,27 +1132,10 @@ function renderAccountBalanceSummary(position) {
   }
 
   const standard = nativeOpenBalances(position).find((entry) => entry.currency === selectedCurrency);
-  const visibility = position.transaction_visibility || {};
-  const deferred = visibility.by_currency?.[selectedCurrency]
-    || (visibility.currency === selectedCurrency ? visibility : null);
-  const deferredAmount = deferred?.deferred_amount;
-  const coverage = deferred?.coverage || {};
-  const deferredIsPartial = Boolean(deferred) && !(coverage.is_historically_complete ?? coverage.is_complete);
   const hasStandard = standard?.amount !== null && standard?.amount !== undefined;
-  const hasDeferred = deferredAmount !== null && deferredAmount !== undefined;
   standardEl.textContent = hasStandard ? formatNativeAmount(selectedCurrency, standard.amount) : "Unavailable";
-  deferredEl.textContent = hasDeferred ? formatNativeAmount(selectedCurrency, deferredAmount) : "Unavailable";
-  deferredBadge.hidden = !deferredIsPartial;
-
-  if (hasStandard && hasDeferred) {
-    const allAccounts = addNativeAmounts(standard.amount, deferredAmount);
-    allAccountsEl.textContent = allAccounts === null
-      ? "Unavailable"
-      : formatNativeAmount(selectedCurrency, allAccounts);
-    allAccountsBadge.hidden = !deferredIsPartial;
-  } else {
-    allAccountsEl.textContent = "Unavailable";
-  }
+  deferredEl.textContent = "Unavailable";
+  allAccountsEl.textContent = "Unavailable";
 
   const fundsAvailable = financialValues(position, "FUNDS_AVAILABLE").find((value) => (
     value.currency === selectedCurrency && value.amount !== null && value.isAuthoritative === true

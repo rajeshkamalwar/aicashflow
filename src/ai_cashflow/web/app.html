@@ -89,7 +89,9 @@
           <div class="account-balance-rows">
             <div class="account-balance-row"><span>Standard orders</span><strong id="account-balance-standard">Unavailable</strong></div>
             <div class="account-balance-row"><span>Deferred transactions</span><strong id="account-balance-deferred">Unavailable</strong><em id="account-balance-deferred-coverage" class="coverage-badge" hidden>Partial coverage</em></div>
+            <small id="account-balance-deferred-note" class="account-balance-row-note">Authoritative Amazon deferred balance is awaiting reconciliation with the Deferred Transaction Report.</small>
             <div class="account-balance-row total"><span>All Accounts</span><strong id="account-balance-all-accounts">Unavailable</strong><em id="account-balance-all-coverage" class="coverage-badge" hidden>Partial coverage</em></div>
+            <small id="account-balance-all-accounts-note" class="account-balance-row-note">Requires the authoritative Amazon Deferred transactions balance.</small>
             <div class="account-balance-row funds"><span>Funds Available</span><strong id="account-balance-funds">Unavailable</strong></div>
           </div>
           <small id="account-balance-funds-note">Amazon has not supplied an authoritative funds-available value through the current API source.</small>
