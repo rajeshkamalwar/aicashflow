@@ -10,6 +10,27 @@ from ai_cashflow.integrations import AmazonSourceRegistry
 
 
 class AmazonSourceRegistryTests(unittest.TestCase):
+
+    def test_deferred_report_discovery_persists_report_metadata_without_downloading_document(self):
+        class DeferredReportsClient:
+            def list_deferred_transaction_reports(self):
+                return [{
+                    "reportId": "deferred-1", "reportType": "GET_DATE_RANGE_FINANCIAL_HOLDS_DATA",
+                    "processingStatus": "DONE", "dataStartTime": "2026-08-01T00:00:00Z",
+                    "dataEndTime": "2026-08-02T00:00:00Z", "createdTime": "2026-08-02T00:05:00Z",
+                    "processingStartTime": "2026-08-02T00:05:01Z", "processingEndTime": "2026-08-02T00:05:10Z",
+                    "reportDocumentId": "document-1",
+                }]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = AmazonSourceRegistry(Path(temp_dir) / "operations.sqlite3", Fernet.generate_key().decode())
+            source = registry.upsert({"name": "Canada", "endpoint": "https://sellingpartnerapi-na.amazon.com", "marketplace": "Canada", "client_id": "client", "client_secret": "secret", "refresh_token": "token"})
+            result = registry.discover_deferred_statement_reports(source["id"], DeferredReportsClient())
+            with registry._connect() as connection:
+                row = connection.execute("SELECT report_type,processing_status,report_document_id FROM amazon_deferred_report_discoveries").fetchone()
+
+        self.assertEqual(result["discovered"], 1)
+        self.assertEqual(tuple(row), ("GET_DATE_RANGE_FINANCIAL_HOLDS_DATA", "DONE", "document-1"))
     def make_registry(self, root: Path) -> AmazonSourceRegistry:
         return AmazonSourceRegistry(root / "operations.sqlite3", Fernet.generate_key().decode())
 

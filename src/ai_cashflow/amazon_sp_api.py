@@ -13,6 +13,7 @@ import httpx
 
 
 SETTLEMENT_REPORT_TYPE = "GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2"
+DEFERRED_TRANSACTION_REPORT_TYPE = "GET_DATE_RANGE_FINANCIAL_HOLDS_DATA"
 LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 MAX_REPORT_BYTES = 25 * 1024 * 1024
 MONEY_QUANTUM = Decimal("0.01")
@@ -57,6 +58,13 @@ class AmazonSpApiClient:
             with httpx.Client(timeout=30.0) as http:
                 return self._list_settlement_reports(http)
         return self._list_settlement_reports(self.http)
+
+    def list_deferred_transaction_reports(self) -> list[dict[str, object]]:
+        """Discover Amazon-created Deferred Transaction Reports without requesting one."""
+        if self.http is None:
+            with httpx.Client(timeout=30.0) as http:
+                return self._list_reports(http, DEFERRED_TRANSACTION_REPORT_TYPE)
+        return self._list_reports(self.http, DEFERRED_TRANSACTION_REPORT_TYPE)
 
     def probe_payments_access(self) -> list[dict[str, object]]:
         if self.http is None:
@@ -1054,18 +1062,21 @@ class AmazonSpApiClient:
         )
 
     def _list_settlement_reports(self, http: httpx.Client) -> list[dict[str, object]]:
+        return self._list_reports(http, SETTLEMENT_REPORT_TYPE)
+
+    def _list_reports(self, http: httpx.Client, report_type: str) -> list[dict[str, object]]:
         self.config.validate()
         token = self._access_token(http)
         response = http.get(
             f"{self.config.endpoint}/reports/2021-06-30/reports",
             headers={"x-amz-access-token": token},
             params={
-                "reportTypes": SETTLEMENT_REPORT_TYPE,
+                "reportTypes": report_type,
                 "processingStatuses": "DONE",
                 "pageSize": 10,
             },
         )
-        self._raise_for_status(response, "list settlement reports")
+        self._raise_for_status(response, f"list {report_type} reports")
         reports = response.json().get("reports", [])
         return reports if isinstance(reports, list) else []
 

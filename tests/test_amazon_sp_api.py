@@ -278,6 +278,22 @@ class AmazonSpApiClientTests(unittest.TestCase):
         self.assertEqual(requests[1].headers["x-amz-access-token"], "access-token")
         self.assertEqual(requests[1].url.params["reportTypes"], "GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2")
 
+    def test_lists_completed_deferred_transaction_reports(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.host == "api.amazon.com":
+                return httpx.Response(200, json={"access_token": "access-token"})
+            return httpx.Response(200, json={"reports": [{"reportId": "D1", "reportType": "GET_DATE_RANGE_FINANCIAL_HOLDS_DATA"}]})
+
+        config = AmazonSpApiConfig("client", "secret", "refresh")
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            reports = AmazonSpApiClient(config, http=http).list_deferred_transaction_reports()
+
+        self.assertEqual(reports[0]["reportId"], "D1")
+        self.assertEqual(requests[1].url.params["reportTypes"], "GET_DATE_RANGE_FINANCIAL_HOLDS_DATA")
+
     def test_refuses_requests_when_credentials_are_incomplete(self):
         with self.assertRaisesRegex(ValueError, "refresh token"):
             AmazonSpApiClient(AmazonSpApiConfig("client", "secret", "")).list_settlement_reports()

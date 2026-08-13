@@ -532,6 +532,25 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS amazon_deferred_report_discoveries (
+                    source_id TEXT NOT NULL,
+                    report_id TEXT NOT NULL,
+                    report_type TEXT NOT NULL,
+                    processing_status TEXT NOT NULL,
+                    data_start_time TEXT,
+                    data_end_time TEXT,
+                    created_time TEXT,
+                    processing_start_time TEXT,
+                    processing_end_time TEXT,
+                    report_document_id TEXT,
+                    discovered_at TEXT NOT NULL,
+                    PRIMARY KEY (source_id, report_id),
+                    FOREIGN KEY (source_id) REFERENCES amazon_sources(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS amazon_transaction_observations (
                     source_id TEXT NOT NULL,
                     marketplace_id TEXT NOT NULL,
@@ -2493,6 +2512,33 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 for retrieved_at, totals in snapshots.items()
             ],
         }
+
+    def discover_deferred_statement_reports(self, source_id: str, client: Any) -> dict[str, int]:
+        """Persist only Deferred Transaction Report metadata; document download is separate."""
+        reports = client.list_deferred_transaction_reports()
+        with self._connect() as connection:
+            for report in reports:
+                report_id = str(report.get("reportId", "")).strip()
+                if not report_id:
+                    continue
+                connection.execute(
+                    """INSERT INTO amazon_deferred_report_discoveries
+                       (source_id,report_id,report_type,processing_status,data_start_time,data_end_time,
+                        created_time,processing_start_time,processing_end_time,report_document_id,discovered_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(source_id,report_id) DO UPDATE SET
+                         report_type=excluded.report_type,processing_status=excluded.processing_status,
+                         data_start_time=excluded.data_start_time,data_end_time=excluded.data_end_time,
+                         created_time=excluded.created_time,processing_start_time=excluded.processing_start_time,
+                         processing_end_time=excluded.processing_end_time,report_document_id=excluded.report_document_id,
+                         discovered_at=excluded.discovered_at""",
+                    (source_id, report_id, str(report.get("reportType", "")),
+                     str(report.get("processingStatus", "")), str(report.get("dataStartTime", "")),
+                     str(report.get("dataEndTime", "")), str(report.get("createdTime", "")),
+                     str(report.get("processingStartTime", "")), str(report.get("processingEndTime", "")),
+                     str(report.get("reportDocumentId", "")), _utc_now()),
+                )
+        return {"discovered": len(reports)}
 
     def sync_source(
         self, source_id: str, client: Any, samples_dir: str | Path,
