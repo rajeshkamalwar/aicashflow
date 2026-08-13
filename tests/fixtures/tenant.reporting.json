@@ -1,0 +1,14 @@
+{
+  "product_name": "Cashflow Test Fixture",
+  "tenant_name": "Test Tenant",
+  "poc_entity": "Test Entity",
+  "currencies": ["USD", "JPY", "SGD"],
+  "reconciliation": {
+    "date_tolerance_days": 3,
+    "amount_tolerance": "0.00",
+    "usd_exchange_rates": {"USD": "1", "JPY": "0.0061", "SGD": "0.7716"}
+  },
+  "client_setup": {
+    "forecast_horizons": ["Daily", "7 days", "14 days", "30 days", "60 days"]
+  }
+}

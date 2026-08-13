@@ -1,7 +1,11 @@
 """Cashflow reconciliation report generation."""
 
 import csv
+import hashlib
+import json
+import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
@@ -91,25 +95,35 @@ def generate_phase0_reports(
     entity: str = "Unknown",
     usd_exchange_rates: dict[str, Decimal] | None = None,
     active_amazon_source_ids: set[str] | None = None,
+    database_path: str | Path | None = None,
+    source_mode: str = "LEGACY_CSV",
 ) -> Path:
     samples_root = Path(samples_dir)
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    source_mode = source_mode.upper()
     source_files = discover_source_files(
         samples_root,
         active_amazon_source_ids=active_amazon_source_ids,
     )
     quality_issues = _validate_source_files(source_files)
-    payouts = _load_payouts(source_files.payout_files)
-    receipts = _load_receipts(source_files.receipt_files)
-    amazon_transactions = _load_amazon_transactions(
-        source_files.amazon_transaction_files
-    )
+    if source_mode == "CANONICAL_DATABASE":
+        if database_path is None:
+            raise ValueError("Canonical reporting requires an explicit database path.")
+        canonical = _load_canonical_report_inputs(database_path)
+        payouts, receipts, amazon_transactions = canonical["payouts"], canonical["receipts"], canonical["transactions"]
+    elif source_mode == "LEGACY_CSV":
+        payouts = _load_payouts(source_files.payout_files)
+        receipts = _load_receipts(source_files.receipt_files)
+        amazon_transactions = _load_amazon_transactions(source_files.amazon_transaction_files)
+    else:
+        raise ValueError("Unsupported report source mode.")
     # Merge Amazon Flat File V2 data
-    ffv2_payouts, ffv2_transactions = _load_flat_file_v2(source_files.flat_file_v2_files, entity=entity)
-    payouts = list(payouts) + ffv2_payouts
-    amazon_transactions = list(amazon_transactions) + ffv2_transactions
+    if source_mode == "LEGACY_CSV":
+        ffv2_payouts, ffv2_transactions = _load_flat_file_v2(source_files.flat_file_v2_files, entity=entity)
+        payouts = list(payouts) + ffv2_payouts
+        amazon_transactions = list(amazon_transactions) + ffv2_transactions
     rates = usd_exchange_rates or {"USD": Decimal("1")}
     payouts = [_payout_to_usd(row, rates) for row in payouts]
     receipts = [_receipt_to_usd(row, rates) for row in receipts]
@@ -155,7 +169,85 @@ def generate_phase0_reports(
         result=result,
         quality_issues=quality_issues,
     )
+    _write_report_metadata(
+        output_root / "report_metadata.json", source_mode, amazon_transactions, receipts,
+        canonical.get("metadata") if source_mode == "CANONICAL_DATABASE" else None,
+    )
     return output_root
+
+
+def _load_canonical_report_inputs(database_path: str | Path) -> dict[str, object]:
+    path = Path(database_path)
+    if not path.is_file():
+        raise ValueError("DATA_PIPELINE_ERROR: canonical production database is unavailable.")
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN")
+        tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
+        required = {
+            "amazon_transaction_state", "bank_receipts",
+            "amazon_financial_event_group_state", "amazon_financial_event_group_sync_state",
+        }
+        if not required <= tables:
+            raise ValueError("DATA_PIPELINE_ERROR: canonical report tables are missing.")
+        rows = connection.execute("""select * from amazon_transaction_state
+            where included_in_totals=1 and conflict=0 order by posted_date, transaction_id""").fetchall()
+        transactions = [_canonical_transaction(row) for row in rows]
+        receipts = [BankReceipt(receipt_id=row["receipt_id"], bank_account=row["bank_account"], currency=row["currency"], receipt_date=datetime.fromisoformat(row["receipt_date"]).date(), amount=Decimal(row["amount"]), reference=row["reference"]) for row in connection.execute("select receipt_id, bank_account, currency, receipt_date, amount, reference from bank_receipts")]
+        payouts = [ExpectedPayout(payout_id=row["financial_event_group_id"], entity="Amazon", marketplace="Amazon", currency=row["currency"], expected_date=datetime.fromisoformat(str(row["fund_transfer_date"] or row["retrieved_at"])[:10]).date(), amount=Decimal(row["original_total"]), reference=row["financial_event_group_id"], source_id=row["source_id"]) for row in connection.execute("select * from amazon_financial_event_group_state where classification='COMPLETED_PAYOUT' and included_as_completed_payout=1")]
+        source_ids = {str(row["source_id"]) for row in rows}
+        initialized_source_ids = {
+            str(row["source_id"])
+            for row in connection.execute(
+                "select source_id from amazon_financial_event_group_sync_state where initialized=1"
+            )
+        }
+        uninitialized_source_ids = sorted(source_ids - initialized_source_ids)
+        if uninitialized_source_ids:
+            payout_availability = {
+                "status": "DATA_UNAVAILABLE",
+                "reason": "CANONICAL_PAYOUT_STATE_NOT_INITIALIZED",
+                "uninitialized_source_ids": uninitialized_source_ids,
+            }
+        elif payouts:
+            payout_availability = {"status": "DATA_AVAILABLE", "reason": None}
+        else:
+            payout_availability = {"status": "DATA_AVAILABLE_EMPTY", "reason": None}
+        transaction_snapshot = connection.execute("select max(retrieved_at) from amazon_transaction_state").fetchone()[0]
+        financial_snapshot = connection.execute("select max(retrieved_at) from amazon_financial_event_group_state").fetchone()[0]
+        metadata = {
+            "transaction_snapshot_retrieved_at": transaction_snapshot,
+            "financial_group_retrieved_at": financial_snapshot,
+            "data_version": hashlib.sha256("|".join(
+                f"{row['source_id']}:{row['transaction_id']}:{row['fingerprint']}"
+                for row in rows
+            ).encode()).hexdigest(),
+            "bank_receipts": {"count": len(receipts), "status": "DATA_AVAILABLE" if receipts else "DATA_UNAVAILABLE", "reason": None if receipts else "NO_BANK_RECEIPTS_IMPORTED"},
+            "canonical_payouts": payout_availability,
+        }
+    finally:
+        connection.close()
+    return {"transactions": transactions, "payouts": payouts, "receipts": receipts, "metadata": metadata}
+
+
+def _canonical_transaction(row: sqlite3.Row) -> AmazonTransaction:
+    composition = json.loads(row["composition_json"] or "{}")
+    return AmazonTransaction(
+        posted_at=row["posted_date"] or "", settlement_id=row["transaction_id"], transaction_type=row["transaction_type"] or "",
+        order_id=row["fingerprint"], sku="", description="", marketplace=row["marketplace_name"], fulfillment="",
+        currency=row["currency"], product_sales=Decimal(composition.get("Product sales", "0")),
+        selling_fees=Decimal(composition.get("Amazon fees", "0")), fba_fees=Decimal(composition.get("FBA fees", "0")),
+        other_transaction_fees=Decimal("0"), other=Decimal(composition.get("Other", "0")), total=Decimal(row["total_amount"] or "0"),
+        status=row["status"], source_file="canonical_database", source_id=row["source_id"],
+    )
+
+
+def _write_report_metadata(path: Path, source_mode: str, transactions: list[AmazonTransaction], receipts: list[BankReceipt], canonical: dict[str, object] | None = None) -> None:
+    snapshot = hashlib.sha256("|".join(f"{t.source_id}:{t.settlement_id}:{t.status}" for t in transactions).encode()).hexdigest()
+    dates = sorted(t.posted_at for t in transactions if t.posted_at)
+    payout_availability = (canonical or {}).get("canonical_payouts", {"status": "DATA_AVAILABLE_EMPTY", "reason": None})
+    path.write_text(json.dumps({"report_snapshot_id": snapshot, "source_mode": source_mode, "generated_at": datetime.now(timezone.utc).isoformat(), "transaction_count": len(transactions), "observed_start": dates[0] if dates else None, "observed_end": dates[-1] if dates else None, "bank_receipts": (canonical or {}).get("bank_receipts", {"count": len(receipts), "status": "DATA_AVAILABLE" if receipts else "DATA_UNAVAILABLE", "reason": None if receipts else "NO_BANK_RECEIPTS_IMPORTED"}), "calculation_engine": "CALCULATION_VALID", "marketplace_transaction_data": "DATA_PARTIAL", "completed_payout_data": payout_availability["status"], "reconciliation_state": "BANK_RECONCILIATION_NOT_AVAILABLE" if not receipts else "RECONCILIATION_PENDING", **(canonical or {})}, indent=2), encoding="utf-8")
 
 
 def _validate_source_files(source_files: SourceFiles) -> list[DataQualityIssue]:

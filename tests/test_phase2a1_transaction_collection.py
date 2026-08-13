@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,25 @@ def transaction(
             "breakdownType": "Principal",
             "breakdownAmount": {"currencyCode": "CAD", "currencyAmount": amount},
         }],
+    }
+
+
+def financial_event_group(
+    group_id: str,
+    *,
+    amount: str,
+    currency: str = "CAD",
+    processing: str = "OPEN",
+    transfer: str = "",
+):
+    return {
+        "FinancialEventGroupId": group_id,
+        "OriginalTotal": {"CurrencyCode": currency, "CurrencyAmount": amount},
+        "ProcessingStatus": processing,
+        "FundTransferStatus": transfer,
+        "FundTransferDate": "2026-08-02T00:00:00Z",
+        "FinancialEventGroupStart": "2026-08-01T00:00:00Z",
+        "FinancialEventGroupEnd": "2026-08-02T00:00:00Z",
     }
 
 
@@ -91,6 +111,49 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
         }
         values.update(overrides)
         return self.registry.create_transaction_backfill(**values)
+
+    def test_financial_event_groups_persist_current_classification_and_sync_marker(self):
+        initial = [
+            financial_event_group("open", amount="100.00"),
+            financial_event_group("pending", amount="80.00", processing="CLOSED", transfer="PENDING"),
+            financial_event_group("failed", amount="70.00", processing="CLOSED", transfer="FAILED"),
+            financial_event_group("zero", amount="0.00", processing="CLOSED"),
+            financial_event_group("charge", amount="-10.00", processing="CLOSED"),
+            financial_event_group("payout", amount="50.00", currency="BRL", processing="CLOSED", transfer="SUCCEEDED"),
+            financial_event_group("unknown", amount="5.00", processing="OTHER"),
+        ]
+        first = datetime(2026, 8, 4, 10, tzinfo=UTC)
+        self.registry.record_financial_event_groups(self.source["id"], initial, first, "run-1")
+        self.registry.record_financial_event_groups(self.source["id"], list(reversed(initial)), first, "run-1")
+        self.registry.record_financial_event_groups(
+            self.source["id"],
+            [financial_event_group("open", amount="125.00", processing="CLOSED", transfer="SUCCEEDED")],
+            first + timedelta(minutes=5),
+            "run-2",
+        )
+
+        with closing(sqlite3.connect(self.db)) as connection:
+            rows = connection.execute(
+                "select financial_event_group_id, currency, original_total, classification, included_as_completed_payout "
+                "from amazon_financial_event_group_state where source_id=? order by financial_event_group_id",
+                (self.source["id"],),
+            ).fetchall()
+            marker = connection.execute(
+                "select initialized, last_successful_run_id from amazon_financial_event_group_sync_state where source_id=?",
+                (self.source["id"],),
+            ).fetchone()
+
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows, [
+            ("charge", "CAD", "-10.00", "COMPLETED_CHARGE", 0),
+            ("failed", "CAD", "70.00", "FAILED_SETTLEMENT", 0),
+            ("open", "CAD", "125.00", "COMPLETED_PAYOUT", 1),
+            ("payout", "BRL", "50.00", "COMPLETED_PAYOUT", 1),
+            ("pending", "CAD", "80.00", "TRANSFER_PENDING", 0),
+            ("unknown", "CAD", "5.00", "SETTLEMENT_STATUS_UNKNOWN", 0),
+            ("zero", "CAD", "0.00", "ZERO_VALUE_SETTLEMENT", 0),
+        ])
+        self.assertEqual(marker, (1, "run-2"))
 
     def test_backfill_splits_a_large_interval_into_immutable_daily_slices(self):
         job = self.create_job()
@@ -189,7 +252,7 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
     def test_legacy_unclassified_job_is_not_historical_completion(self):
         job = self.create_job(overall_end=self.start + timedelta(hours=1), slice_hours=1)
         self.registry.run_transaction_backfill(job["job_id"], PagedClient())
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             run_id = connection.execute(
                 "SELECT run_id FROM amazon_transaction_runs WHERE source_id=? AND job_type='HISTORICAL_BACKFILL'",
                 (self.source["id"],),
@@ -301,7 +364,7 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
 
     def test_legacy_partial_rows_without_a_completed_run_are_not_visible(self):
         payload = '{"transactionId":"legacy","transactionStatus":"DEFERRED","totalAmount":{"currencyCode":"CAD","currencyAmount":"99"}}'
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 """INSERT INTO amazon_transaction_state
                    (source_id, marketplace_id, transaction_id, marketplace_name, currency,
@@ -622,7 +685,7 @@ class Phase2A1TransactionCollectionTests(unittest.TestCase):
             retrieved + timedelta(minutes=5),
         )
 
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             observations = connection.execute(
                 "SELECT COUNT(*) FROM amazon_transaction_observations"
             ).fetchone()[0]

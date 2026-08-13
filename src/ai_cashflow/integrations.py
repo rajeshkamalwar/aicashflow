@@ -643,6 +643,28 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                    ON amazon_transaction_staging (run_id, status, currency)"""
             )
             connection.execute(
+                """CREATE TABLE IF NOT EXISTS amazon_financial_event_group_state (
+                    source_id TEXT NOT NULL, financial_event_group_id TEXT NOT NULL,
+                    currency TEXT NOT NULL, original_total TEXT NOT NULL,
+                    processing_status TEXT NOT NULL, fund_transfer_status TEXT,
+                    fund_transfer_date TEXT, financial_event_group_start TEXT,
+                    financial_event_group_end TEXT, retrieved_at TEXT NOT NULL,
+                    source_sync_run_id TEXT, fingerprint TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    included_as_completed_payout INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (source_id, financial_event_group_id)
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS amazon_financial_event_group_sync_state (
+                    source_id TEXT PRIMARY KEY,
+                    initialized INTEGER NOT NULL DEFAULT 0,
+                    last_successful_sync_at TEXT,
+                    last_successful_run_id TEXT,
+                    retrieved_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS amazon_transaction_backfill_jobs (
                     job_id TEXT PRIMARY KEY,
@@ -770,6 +792,37 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                      lock_owner=excluded.lock_owner,lock_run_id=excluded.lock_run_id""",
                 (task_name, heartbeat, next_due, started_at, completed_at, duration_ms, missed,
                  int(failed), blocked_by, lock_owner, lock_run_id, missed, int(failed)),
+            )
+
+    def record_financial_event_groups(self, source_id: str, groups: list[dict[str, object]], retrieved_at: datetime, source_sync_run_id: str | None = None) -> None:
+        """Persist one deterministic current state per Amazon FinancialEventGroup."""
+        with self._connect() as connection:
+            for group in groups:
+                group_id = str(group.get("FinancialEventGroupId") or "").strip()
+                total = group.get("OriginalTotal")
+                if not group_id or not isinstance(total, dict):
+                    continue
+                amount = Decimal(str(total.get("CurrencyAmount") or total.get("currencyAmount") or "0"))
+                currency = str(total.get("CurrencyCode") or total.get("currencyCode") or "").upper()
+                processing = str(group.get("ProcessingStatus") or "").upper()
+                transfer = str(group.get("FundTransferStatus") or "").upper()
+                classification = ("COMPLETED_PAYOUT" if processing == "CLOSED" and amount > 0 and transfer == "SUCCEEDED" else "COMPLETED_CHARGE" if processing == "CLOSED" and amount < 0 else "ZERO_VALUE_SETTLEMENT" if processing == "CLOSED" and amount == 0 else "FAILED_SETTLEMENT" if transfer == "FAILED" else "TRANSFER_PENDING" if transfer in {"PENDING", "PROCESSING"} else "OPEN_BALANCE_GROUP" if processing == "OPEN" else "SETTLEMENT_STATUS_UNKNOWN")
+                fingerprint = hashlib.sha256(json.dumps(group, sort_keys=True, default=str).encode()).hexdigest()
+                connection.execute("""INSERT INTO amazon_financial_event_group_state
+                    (source_id,financial_event_group_id,currency,original_total,processing_status,fund_transfer_status,fund_transfer_date,financial_event_group_start,financial_event_group_end,retrieved_at,source_sync_run_id,fingerprint,classification,included_as_completed_payout)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_id,financial_event_group_id) DO UPDATE SET
+                    currency=excluded.currency,original_total=excluded.original_total,processing_status=excluded.processing_status,fund_transfer_status=excluded.fund_transfer_status,fund_transfer_date=excluded.fund_transfer_date,financial_event_group_start=excluded.financial_event_group_start,financial_event_group_end=excluded.financial_event_group_end,retrieved_at=excluded.retrieved_at,source_sync_run_id=excluded.source_sync_run_id,fingerprint=excluded.fingerprint,classification=excluded.classification,included_as_completed_payout=excluded.included_as_completed_payout""",
+                    (source_id,group_id,currency,str(amount),processing,transfer or None,group.get("FundTransferDate"),group.get("FinancialEventGroupStart"),group.get("FinancialEventGroupEnd"),retrieved_at.isoformat(),source_sync_run_id,fingerprint,classification,int(classification == "COMPLETED_PAYOUT")))
+            connection.execute(
+                """INSERT INTO amazon_financial_event_group_sync_state
+                    (source_id, initialized, last_successful_sync_at, last_successful_run_id, retrieved_at)
+                    VALUES (?, 1, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        initialized=1,
+                        last_successful_sync_at=excluded.last_successful_sync_at,
+                        last_successful_run_id=excluded.last_successful_run_id,
+                        retrieved_at=excluded.retrieved_at""",
+                (source_id, retrieved_at.isoformat(), source_sync_run_id, retrieved_at.isoformat()),
             )
 
     def financial_snapshot_metadata(self, source_id: str) -> dict[str, str | int | None]:
@@ -2333,6 +2386,13 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
         source = self.get_source(source_id)
         started_at = _utc_now()
         reports = client.list_settlement_reports()
+        list_groups = getattr(client, "list_financial_event_groups", None)
+        if callable(list_groups):
+            self.record_financial_event_groups(
+                source_id,
+                list_groups(datetime.now(timezone.utc) - timedelta(days=90)),
+                datetime.now(timezone.utc),
+            )
         target_dir = Path(samples_dir) / "marketplaces" / "api" / source_id
         target_dir.mkdir(parents=True, exist_ok=True)
         ingested = 0

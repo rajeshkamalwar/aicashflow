@@ -1,0 +1,6 @@
+snapshot_date,rate_date,rate_source,source_id,account_id,venue,group,local_amount,currency,usd_rate
+2026-07-17,2026-07-17,Fixed USD,amazon,amazon,Amazon,Amazon,100.00,USD,1
+2026-07-17,2026-07-17,Fixed USD,web,web,Own Webstores / Other,Own Webstores / Other,200.00,USD,1
+2026-07-17,2026-07-17,Fixed USD,onbuy,onbuy,OnBuy,OnBuy,30.00,USD,1
+2026-07-17,2026-07-17,Fixed USD,walmart,walmart,Walmart,Walmart,20.00,USD,1
+2026-07-17,2026-07-17,Fixed USD,mercado,mercado,MercadoLibre,MercadoLibre,10.00,USD,1

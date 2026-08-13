@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 import zlib
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -112,7 +113,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
         self.assertEqual(no_fetch.calls, 0)
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(self.registry.transaction_visibility(self.source["id"], "CAD")["deferred_released_count"], 2)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM amazon_transaction_staging").fetchone()[0], 0)
 
     def test_all_and_selected_currency_share_one_financial_snapshot(self):
@@ -157,7 +158,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
             [transaction("T1", "12.34")], retrieved,
         )
 
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             observation = connection.execute(
                 "SELECT payload_json,total_amount,transaction_type,posted_date FROM amazon_transaction_observations"
             ).fetchone()
@@ -204,7 +205,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
         with patch.object(self.registry, "_transaction_columns", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self.registry._promote_collection_run(run_id)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM amazon_transaction_staging WHERE run_id=?", (run_id,)
             ).fetchone()[0], 2)
@@ -222,7 +223,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
             coverage_end=datetime(2026, 5, 1, 6, tzinfo=UTC),
         )
         self.registry._stage_transaction_page(run_id, [transaction("T1")], None, None)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 "UPDATE amazon_transaction_runs SET transactions_received=2 WHERE run_id=?", (run_id,)
             )
@@ -234,7 +235,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
             self.source["id"], "CA", "Amazon.ca", "CAD", "DEFERRED_RELEASED",
             [transaction("T1", "12.34")], datetime(2026, 8, 5, 8, tzinfo=UTC),
         )
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             compressed = connection.execute(
                 "SELECT payload_zlib FROM amazon_transaction_payloads"
             ).fetchone()[0]
@@ -272,7 +273,7 @@ class Phase2B1HardeningTests(unittest.TestCase):
             "open_balance_sync", started_at=(old + timedelta(minutes=6)).isoformat(),
             lock_owner="open_balance_scheduler", lock_run_id="run-1",
         )
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             row = connection.execute(
                 "SELECT missed_cycle_count,lock_owner,lock_run_id FROM amazon_scheduler_state"
             ).fetchone()

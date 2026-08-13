@@ -1,0 +1,6 @@
+source_id,source_name,active,connector_type,connector_status,verification_status,expected_currency
+amazon,Amazon,true,api,ready,approved,USD
+web,Own Webstores / Other,true,api,ready,approved,USD
+onbuy,OnBuy,true,api,ready,approved,USD
+walmart,Walmart,true,api,ready,approved,USD
+mercado,MercadoLibre,true,api,ready,pending,USD

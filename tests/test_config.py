@@ -44,7 +44,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.marketplace_ar_fx_path, Path("/var/lib/aicashflow/config/marketplace_ar_fx_rates.csv"))
 
     def test_default_config_points_to_phase0_paths(self):
-        config = AppConfig()
+        fixture = Path(__file__).resolve().parent / "fixtures" / "tenant.reporting.json"
+        with patch.dict(os.environ, {"AI_CASHFLOW_TENANT_CONFIG_PATH": str(fixture)}):
+            config = AppConfig()
 
         self.assertEqual(config.samples_dir.name, "samples")
         self.assertEqual(config.reports_dir.name, "phase0")

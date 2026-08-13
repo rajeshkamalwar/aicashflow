@@ -109,6 +109,8 @@ class Phase0Service:
         reports_dir = generate_phase0_reports(
             self.config.samples_dir,
             self.config.reports_dir,
+            database_path=self.config.database_path,
+            source_mode=self.config.report_source_mode,
             entity=entity,
             usd_exchange_rates=self.config.tenant.reconciliation.usd_exchange_rates,
             active_amazon_source_ids=active_amazon_source_ids,
@@ -1261,6 +1263,9 @@ class Phase0Service:
                 )
         client = AmazonSpApiClient(registry.credentials(str(source["id"])))
         groups = client.list_financial_event_groups(started_after)
+        record_groups = getattr(registry, "record_financial_event_groups", None)
+        if record_groups is not None:
+            record_groups(str(source["id"]), groups, checked)
         for group in groups:
             group_id = str(group.get("FinancialEventGroupId", "")).strip()
             settlement = settlements.get(group_id)

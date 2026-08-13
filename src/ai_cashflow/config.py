@@ -461,6 +461,10 @@ class TenantConfig:
 
 @dataclass
 class AppConfig:
+    report_source_mode: str = field(default_factory=lambda: os.getenv(
+        "AI_CASHFLOW_REPORT_SOURCE_MODE",
+        "CANONICAL_DATABASE" if os.getenv("AI_CASHFLOW_ENV", "local") == "production" else "LEGACY_CSV",
+    ).strip().upper())
     samples_dir: Path = field(default_factory=lambda: _path_env(
         "AI_CASHFLOW_SAMPLES_DIR", ROOT_DIR / "data" / "samples"
     ))
@@ -539,6 +543,10 @@ class AppConfig:
     )
 
     def __post_init__(self) -> None:
+        if self.report_source_mode not in {"CANONICAL_DATABASE", "LEGACY_CSV"}:
+            raise ValueError("AI_CASHFLOW_REPORT_SOURCE_MODE must be CANONICAL_DATABASE or LEGACY_CSV")
+        if self.environment == "production" and self.report_source_mode != "CANONICAL_DATABASE":
+            raise ValueError("Production reports require CANONICAL_DATABASE")
         if self.marketplace_ar_ingest_mode not in {"hybrid", "api_only"}:
             raise ValueError(
                 "AI_CASHFLOW_MARKETPLACE_AR_INGEST_MODE must be hybrid or api_only"
@@ -548,6 +556,8 @@ class AppConfig:
                 "AI_CASHFLOW_DATABASE_PATH",
                 self.reports_dir / "operations.sqlite3",
             )
+        if self.environment == "production" and not os.getenv("AI_CASHFLOW_DATABASE_PATH"):
+            raise ValueError("AI_CASHFLOW_DATABASE_PATH is required in production")
         if not 1 <= self.transaction_overlap_hours <= self.transaction_incremental_lookback_hours <= 24 * 30:
             raise ValueError("Transaction overlap/lookback hours are invalid")
         if self.transaction_safety_delay_minutes < 2:

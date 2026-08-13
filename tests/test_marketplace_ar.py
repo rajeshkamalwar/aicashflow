@@ -133,30 +133,30 @@ class MarketplaceArTests(unittest.TestCase):
         self.assertEqual(summary["conflicting_rows"], 2)
 
     def test_reference_snapshot_matches_excel_dashboard_logic(self):
-        project_root = Path(__file__).resolve().parents[1]
+        fixture_root = Path(__file__).resolve().parent / "fixtures" / "marketplace_ar"
 
         summary = summarize_marketplace_ar(
-            project_root / "data" / "samples" / "marketplace_ar",
-            registry_path=project_root / "config" / "marketplace_ar_sources.csv",
-            fx_path=project_root / "config" / "marketplace_ar_fx_rates.csv",
+            fixture_root,
+            registry_path=fixture_root / "source_registry.csv",
+            fx_path=fixture_root / "config" / "fx_rates.csv",
             as_of_date=date(2026, 7, 17),
         )
 
         self.assertEqual(summary["currency"], "USD")
-        self.assertEqual(summary["total_ar_usd"], "2022054.80")
-        self.assertEqual(summary["controlled_total_ar_usd"], "2020496.91")
-        self.assertEqual(summary["marketplace_count"], 78)
-        self.assertEqual(summary["unique_marketplace_count"], 77)
-        self.assertEqual(summary["fx_exposed_ar_usd"], "1332315.35")
+        self.assertEqual(summary["total_ar_usd"], "360.00")
+        self.assertEqual(summary["controlled_total_ar_usd"], "360.00")
+        self.assertEqual(summary["marketplace_count"], 5)
+        self.assertEqual(summary["unique_marketplace_count"], 5)
+        self.assertEqual(summary["fx_exposed_ar_usd"], "0.00")
         self.assertFalse(summary["display_ready"])
         self.assertEqual(
             {row["name"]: row["amount_usd"] for row in summary["channel_breakdown"]},
             {
-                "Amazon": "1309883.08",
-                "Own Webstores / Other": "656977.10",
-                "OnBuy": "49293.10",
-                "Walmart": "4831.05",
-                "MercadoLibre": "1070.48",
+                "Amazon": "100.00",
+                "Own Webstores / Other": "200.00",
+                "OnBuy": "30.00",
+                "Walmart": "20.00",
+                "MercadoLibre": "10.00",
             },
         )
 

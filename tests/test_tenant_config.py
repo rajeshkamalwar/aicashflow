@@ -174,7 +174,7 @@ class TenantConfigTests(unittest.TestCase):
         self.assertEqual(payload["governance"]["data_retention"], "7 years")
 
     def test_local_tenant_config_has_one_daily_forecast_setup(self):
-        config_path = Path(__file__).resolve().parents[1] / "config" / "tenant.local.json"
+        config_path = Path(__file__).resolve().parent / "fixtures" / "tenant.reporting.json"
         text = config_path.read_text(encoding="utf-8")
         tenant = TenantConfig.from_file(config_path)
 

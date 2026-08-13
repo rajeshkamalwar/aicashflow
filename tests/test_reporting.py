@@ -1,8 +1,10 @@
 from pathlib import Path
 from decimal import Decimal
 import shutil
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ai_cashflow.reporting import discover_source_files, generate_phase0_reports
 
@@ -13,6 +15,120 @@ AMAZON_REPORT = ROOT / "tests" / "fixtures" / "amazon_transaction_report_sample.
 
 
 class ReportingTests(unittest.TestCase):
+    def test_canonical_payouts_are_unavailable_until_a_group_sync_completes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db = root / "operations.sqlite3"
+            connection = sqlite3.connect(db)
+            try:
+                connection.executescript("""
+                create table amazon_transaction_state (source_id text, marketplace_id text, transaction_id text, marketplace_name text, currency text, status text, retrieved_at text, fingerprint text, conflict integer, included_in_totals integer, total_amount text, transaction_type text, posted_date text, composition_json text);
+                create table bank_receipts (receipt_id text, bank_account text, currency text, receipt_date text, amount text, reference text);
+                create table amazon_financial_event_group_state (source_id text, financial_event_group_id text, currency text, original_total text, processing_status text, fund_transfer_status text, fund_transfer_date text, financial_event_group_start text, financial_event_group_end text, retrieved_at text, source_sync_run_id text, fingerprint text, classification text, included_as_completed_payout integer);
+                create table amazon_financial_event_group_sync_state (source_id text primary key, initialized integer not null, last_successful_sync_at text, last_successful_run_id text, retrieved_at text not null);
+                insert into amazon_transaction_state values ('s','m','current','Amazon.ca','CAD','DEFERRED','2026-08-12','fp',0,1,'10.00','Order','2026-08-01','{}');
+                """)
+            finally:
+                connection.close()
+
+            output = generate_phase0_reports(root / "samples", root / "reports", database_path=db, source_mode="CANONICAL_DATABASE", usd_exchange_rates={"USD": Decimal("1"), "CAD": Decimal("1")})
+            metadata = (output / "report_metadata.json").read_text(encoding="utf-8")
+
+        self.assertIn('"status": "DATA_UNAVAILABLE"', metadata)
+        self.assertIn("CANONICAL_PAYOUT_STATE_NOT_INITIALIZED", metadata)
+        self.assertNotIn('"completed_payout_data": "DATA_AVAILABLE_EMPTY"', metadata)
+
+    def test_initialized_empty_canonical_payout_state_is_available_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db = root / "operations.sqlite3"
+            connection = sqlite3.connect(db)
+            try:
+                connection.executescript("""
+                create table amazon_transaction_state (source_id text, marketplace_id text, transaction_id text, marketplace_name text, currency text, status text, retrieved_at text, fingerprint text, conflict integer, included_in_totals integer, total_amount text, transaction_type text, posted_date text, composition_json text);
+                create table bank_receipts (receipt_id text, bank_account text, currency text, receipt_date text, amount text, reference text);
+                create table amazon_financial_event_group_state (source_id text, financial_event_group_id text, currency text, original_total text, processing_status text, fund_transfer_status text, fund_transfer_date text, financial_event_group_start text, financial_event_group_end text, retrieved_at text, source_sync_run_id text, fingerprint text, classification text, included_as_completed_payout integer);
+                create table amazon_financial_event_group_sync_state (source_id text primary key, initialized integer not null, last_successful_sync_at text, last_successful_run_id text, retrieved_at text not null);
+                insert into amazon_transaction_state values ('s','m','current','Amazon.ca','CAD','DEFERRED','2026-08-12','fp',0,1,'10.00','Order','2026-08-01','{}');
+                insert into amazon_financial_event_group_sync_state values ('s',1,'2026-08-12T00:00:00Z','run-1','2026-08-12T00:00:00Z');
+                """)
+            finally:
+                connection.close()
+
+            output = generate_phase0_reports(root / "samples", root / "reports", database_path=db, source_mode="CANONICAL_DATABASE", usd_exchange_rates={"USD": Decimal("1"), "CAD": Decimal("1")})
+            metadata = (output / "report_metadata.json").read_text(encoding="utf-8")
+
+        self.assertIn('"status": "DATA_AVAILABLE_EMPTY"', metadata)
+
+    def test_initialized_canonical_completed_payout_state_is_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db = root / "operations.sqlite3"
+            connection = sqlite3.connect(db)
+            try:
+                connection.executescript("""
+                create table amazon_transaction_state (source_id text, marketplace_id text, transaction_id text, marketplace_name text, currency text, status text, retrieved_at text, fingerprint text, conflict integer, included_in_totals integer, total_amount text, transaction_type text, posted_date text, composition_json text);
+                create table bank_receipts (receipt_id text, bank_account text, currency text, receipt_date text, amount text, reference text);
+                create table amazon_financial_event_group_state (source_id text, financial_event_group_id text, currency text, original_total text, processing_status text, fund_transfer_status text, fund_transfer_date text, financial_event_group_start text, financial_event_group_end text, retrieved_at text, source_sync_run_id text, fingerprint text, classification text, included_as_completed_payout integer);
+                create table amazon_financial_event_group_sync_state (source_id text primary key, initialized integer not null, last_successful_sync_at text, last_successful_run_id text, retrieved_at text not null);
+                insert into amazon_transaction_state values ('s','m','current','Amazon.ca','CAD','DEFERRED','2026-08-12','fp',0,1,'10.00','Order','2026-08-01','{}');
+                insert into amazon_financial_event_group_sync_state values ('s',1,'2026-08-12T00:00:00Z','run-1','2026-08-12T00:00:00Z');
+                insert into amazon_financial_event_group_state values ('s','group-1','CAD','25.00','CLOSED','SUCCEEDED','2026-08-13','2026-08-01','2026-08-12','2026-08-12','run-1','fp','COMPLETED_PAYOUT',1);
+                """)
+            finally:
+                connection.close()
+
+            output = generate_phase0_reports(root / "samples", root / "reports", database_path=db, source_mode="CANONICAL_DATABASE", usd_exchange_rates={"USD": Decimal("1"), "CAD": Decimal("1")})
+            metadata = (output / "report_metadata.json").read_text(encoding="utf-8")
+            payouts = (output / "unmatched_expected_payouts.csv").read_text(encoding="utf-8")
+
+        self.assertIn('"status": "DATA_AVAILABLE"', metadata)
+        self.assertIn("group-1", payouts)
+
+    def test_canonical_reporting_does_not_load_legacy_payout_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db = root / "operations.sqlite3"
+            connection = sqlite3.connect(db)
+            try:
+                connection.executescript("""
+                create table amazon_transaction_state (source_id text, marketplace_id text, transaction_id text, marketplace_name text, currency text, status text, retrieved_at text, fingerprint text, conflict integer, included_in_totals integer, total_amount text, transaction_type text, posted_date text, composition_json text);
+                create table bank_receipts (receipt_id text, bank_account text, currency text, receipt_date text, amount text, reference text);
+                create table amazon_financial_event_group_state (source_id text, financial_event_group_id text, currency text, original_total text, processing_status text, fund_transfer_status text, fund_transfer_date text, financial_event_group_start text, financial_event_group_end text, retrieved_at text, source_sync_run_id text, fingerprint text, classification text, included_as_completed_payout integer);
+                create table amazon_financial_event_group_sync_state (source_id text primary key, initialized integer not null, last_successful_sync_at text, last_successful_run_id text, retrieved_at text not null);
+                insert into amazon_transaction_state values ('s','m','current','Amazon.ca','CAD','DEFERRED','2026-08-12','fp',0,1,'10.00','Order','2026-08-01','{}');
+                """)
+            finally:
+                connection.close()
+
+            with patch("ai_cashflow.reporting._load_payouts", side_effect=AssertionError("legacy payout fallback")), patch("ai_cashflow.reporting._load_flat_file_v2", side_effect=AssertionError("legacy SP-API fallback")):
+                generate_phase0_reports(root / "samples", root / "reports", database_path=db, source_mode="CANONICAL_DATABASE", usd_exchange_rates={"USD": Decimal("1"), "CAD": Decimal("1")})
+    def test_canonical_database_uses_one_current_included_state_row(self):
+        for _ in range(50):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                db = root / "operations.sqlite3"
+                connection = sqlite3.connect(db)
+                try:
+                    connection.executescript("""
+                    create table amazon_transaction_state (source_id text, marketplace_id text, transaction_id text, marketplace_name text, currency text, status text, retrieved_at text, fingerprint text, conflict integer, included_in_totals integer, total_amount text, transaction_type text, posted_date text, composition_json text);
+                    create table bank_receipts (receipt_id text, bank_account text, currency text, receipt_date text, amount text, reference text);
+                    create table amazon_financial_event_group_state (source_id text, financial_event_group_id text, currency text, original_total text, processing_status text, fund_transfer_status text, fund_transfer_date text, financial_event_group_start text, financial_event_group_end text, retrieved_at text, source_sync_run_id text, fingerprint text, classification text, included_as_completed_payout integer);
+                    create table amazon_financial_event_group_sync_state (source_id text primary key, initialized integer not null, last_successful_sync_at text, last_successful_run_id text, retrieved_at text not null);
+                    insert into amazon_transaction_state values ('s','m','current','Amazon.ca','CAD','DEFERRED','2026-08-12','fp',0,1,'10.00','Order','2026-08-01','{}');
+                    insert into amazon_transaction_state values ('s','m','excluded','Amazon.ca','CAD','RELEASED','2026-08-12','fp2',0,0,'99.00','Order','2026-08-01','{}');
+                    """)
+                finally:
+                    connection.close()
+                output = generate_phase0_reports(root / "samples", root / "reports", database_path=db, source_mode="CANONICAL_DATABASE", usd_exchange_rates={"USD": Decimal("1"), "CAD": Decimal("1")})
+                activity = (output / "marketplace_activity.csv").read_text(encoding="utf-8")
+                metadata = (output / "report_metadata.json").read_text(encoding="utf-8")
+                self.assertIn("current", activity)
+                self.assertNotIn("excluded", activity)
+                self.assertIn('"transaction_count": 1', metadata)
+                self.assertIn('"source_mode": "CANONICAL_DATABASE"', metadata)
+                self.assertIn('"data_version":', metadata)
+                self.assertIn("NO_BANK_RECEIPTS_IMPORTED", metadata)
     def test_discovers_phase0_source_files(self):
         sources = discover_source_files(SAMPLES)
 
