@@ -7,6 +7,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import hashlib
+import csv
+import gzip
+import io
 import json
 import logging
 import math
@@ -530,6 +533,23 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                 )
                 """
             )
+            connection.execute("""CREATE TABLE IF NOT EXISTS amazon_deferred_statement_snapshots (
+                snapshot_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, report_id TEXT NOT NULL,
+                report_document_id TEXT NOT NULL, report_generated_at TEXT, retrieved_at TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL, content_length INTEGER NOT NULL, compression TEXT,
+                encoding TEXT, currency TEXT, row_count INTEGER NOT NULL, aggregation_version TEXT NOT NULL,
+                candidate_total TEXT, candidate_status TEXT NOT NULL, reconciliation_status TEXT NOT NULL,
+                raw_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(source_id, report_id, report_document_id, content_sha256))""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS amazon_deferred_statement_rows (
+                snapshot_id TEXT NOT NULL, row_identity TEXT NOT NULL, native_currency TEXT,
+                source_row_number INTEGER NOT NULL, normalized_json TEXT NOT NULL,
+                PRIMARY KEY(snapshot_id,row_identity),
+                FOREIGN KEY(snapshot_id) REFERENCES amazon_deferred_statement_snapshots(snapshot_id) ON DELETE CASCADE)""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS amazon_seller_central_observations (
+                id TEXT PRIMARY KEY, source_id TEXT NOT NULL, currency TEXT NOT NULL, observed_at TEXT NOT NULL,
+                standard_orders TEXT, deferred_transactions TEXT, all_accounts TEXT, funds_available TEXT,
+                account_level_reserve TEXT, recent_payout TEXT, evidence_reference TEXT NOT NULL, created_at TEXT NOT NULL)""")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS amazon_deferred_report_discoveries (
@@ -2539,6 +2559,38 @@ class AmazonSourceRegistry(AmazonIntegrationManager):
                      str(report.get("reportDocumentId", "")), _utc_now()),
                 )
         return {"discovered": len(reports)}
+
+    def ingest_deferred_statement_document(self, source_id: str, report: Mapping[str, Any], body: bytes, reports_dir: str | Path) -> dict[str, Any]:
+        """Persist raw evidence and lossless rows; candidate totals remain explicitly unverified."""
+        report_id = str(report.get("reportId", "")).strip(); document_id = str(report.get("reportDocumentId", "")).strip()
+        if not report_id or not document_id: raise ValueError("A completed Deferred Transaction Report requires report and document IDs.")
+        content_hash = hashlib.sha256(body).hexdigest(); root = Path(reports_dir) / "amazon-deferred" / source_id
+        root.mkdir(parents=True, exist_ok=True); os.chmod(root, 0o700)
+        raw = root / f"{report_id}-{content_hash}.raw"
+        if not raw.exists(): raw.write_bytes(body); os.chmod(raw, 0o600)
+        payload = gzip.decompress(body) if body[:2] == b"\x1f\x8b" else body
+        text = payload.decode("utf-8-sig")
+        dialect = csv.excel_tab if "\t" in text.partition("\n")[0] else csv.excel
+        reader = csv.DictReader(io.StringIO(text), dialect=dialect); rows = list(reader); columns = reader.fieldnames or []
+        snapshot_id = hashlib.sha256(f"{source_id}|{report_id}|{document_id}|{content_hash}".encode()).hexdigest()
+        currency_columns = [name for name in columns if "currency" in name.lower()]
+        with self._connect() as connection:
+            exists = connection.execute("SELECT snapshot_id FROM amazon_deferred_statement_snapshots WHERE source_id=? AND report_id=? AND report_document_id=? AND content_sha256=?", (source_id, report_id, document_id, content_hash)).fetchone()
+            if exists: return {"snapshot_id": exists[0], "idempotent": True, "row_count": len(rows), "columns": columns}
+            currency = next((str(row.get(name, "")) for row in rows for name in currency_columns if row.get(name)), None)
+            now = _utc_now()
+            connection.execute("INSERT INTO amazon_deferred_statement_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (snapshot_id,source_id,report_id,document_id,str(report.get("createdTime", "")),now,content_hash,len(body),"gzip" if body[:2] == b"\x1f\x8b" else "none","utf-8",currency,len(rows),"UNMAPPED_SCHEMA_V1",None,"UNVERIFIED","RECONCILIATION_PENDING",str(raw),now))
+            for number,row in enumerate(rows, start=2):
+                identity=hashlib.sha256(json.dumps(row,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+                connection.execute("INSERT INTO amazon_deferred_statement_rows VALUES (?,?,?,?,?)", (snapshot_id,identity,currency,number,json.dumps(row,sort_keys=True)))
+        return {"snapshot_id": snapshot_id, "idempotent": False, "row_count": len(rows), "columns": columns, "currency": currency}
+
+    def deferred_statement_progress(self, source_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            report = connection.execute("SELECT * FROM amazon_deferred_report_discoveries WHERE source_id=? ORDER BY discovered_at DESC LIMIT 1", (source_id,)).fetchone()
+            snapshot = connection.execute("SELECT * FROM amazon_deferred_statement_snapshots WHERE source_id=? ORDER BY retrieved_at DESC LIMIT 1", (source_id,)).fetchone()
+            reconciled = connection.execute("SELECT COUNT(*) FROM amazon_seller_central_observations WHERE source_id=?", (source_id,)).fetchone()[0]
+        return {"report_availability": "WAITING_FOR_AMAZON" if not report else report["processing_status"], "latest_report": dict(report) if report else None, "schema_discovered": bool(snapshot), "candidate_amount": None, "candidate_currency": snapshot["currency"] if snapshot else None, "reconciliation_count": reconciled, "required_reconciliation_count": 3, "mapping_status": "NOT_ACCEPTED"}
 
     def sync_source(
         self, source_id: str, client: Any, samples_dir: str | Path,

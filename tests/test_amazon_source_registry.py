@@ -31,6 +31,16 @@ class AmazonSourceRegistryTests(unittest.TestCase):
 
         self.assertEqual(result["discovered"], 1)
         self.assertEqual(tuple(row), ("GET_DATE_RANGE_FINANCIAL_HOLDS_DATA", "DONE", "document-1"))
+
+    def test_deferred_document_ingestion_preserves_unknown_columns_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = self.make_registry(Path(temp_dir)); source = registry.upsert({"name":"Canada","endpoint":"https://sellingpartnerapi-na.amazon.com","client_id":"c","client_secret":"s","refresh_token":"t"})
+            report={"reportId":"R1","reportDocumentId":"D1","createdTime":"2026-08-01T00:00:00Z"}
+            first=registry.ingest_deferred_statement_document(source["id"],report,b"total\tcurrency\tunknown\n4.25\tCAD\tkept\n",Path(temp_dir)/"reports")
+            again=registry.ingest_deferred_statement_document(source["id"],report,b"total\tcurrency\tunknown\n4.25\tCAD\tkept\n",Path(temp_dir)/"reports")
+            progress=registry.deferred_statement_progress(source["id"])
+        self.assertEqual(first["row_count"],1); self.assertIn("unknown",first["columns"]); self.assertTrue(again["idempotent"])
+        self.assertTrue(progress["schema_discovered"]); self.assertEqual(progress["mapping_status"],"NOT_ACCEPTED")
     def make_registry(self, root: Path) -> AmazonSourceRegistry:
         return AmazonSourceRegistry(root / "operations.sqlite3", Fernet.generate_key().decode())
 

@@ -305,6 +305,18 @@ def amazon_transaction_collection_diagnostics(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/admin/integrations/amazon/sources/{source_id}/deferred-statement-progress", response_model=dict[str, object])
+def amazon_deferred_statement_progress(
+    source_id: str,
+    _: None = Depends(require_super_admin),
+    registry: AmazonSourceRegistry = Depends(get_amazon_source_registry),
+) -> dict[str, object]:
+    try:
+        return registry.deferred_statement_progress(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post(
     "/admin/integrations/amazon/sources/{source_id}/transaction-backfills",
     response_model=dict[str, object],
